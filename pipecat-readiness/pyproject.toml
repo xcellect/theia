@@ -1,0 +1,14 @@
+[project]
+name = "voice-hackathon-pipecat-readiness"
+version = "0.1.0"
+description = "Local modular voice practice with SambaNova/Hume and General Compute/Gradium"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "pipecat-ai[cli,deepgram,gradium,hume,runner,sambanova,silero,webrtc]==1.11.0",
+  "fastapi>=0.115.6,<1",
+  "uvicorn>=0.32.0,<1",
+  "python-dotenv>=1,<2",
+]
+
+[tool.uv]
+package = false
