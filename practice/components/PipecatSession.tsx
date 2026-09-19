@@ -54,8 +54,43 @@ function stopTracks(client: PipecatClient) {
   } catch { /* A client that failed before device initialization has no tracks. */ }
 }
 
-export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { onBusyChange?: (busy: boolean) => void; variant?: keyof typeof SESSION_VARIANTS }) {
-  const settings = SESSION_VARIANTS[variant];
+export type ResearchIntentPreview = {
+  type: "research.intent";
+  phase: "pending" | "ready" | "error";
+  transcript: string;
+  answers?: { intent?: { choice?: string; confidence?: number }; needs_code?: { noul?: number } };
+  model?: string;
+  profile?: string;
+  turnId?: string;
+  message?: string;
+  at?: string;
+};
+export type ResearchActivity = { message: string; at?: string };
+
+export default function PipecatSession({ onBusyChange, variant = "pipecat", research = false, compact = false, onResearchRun, onVoiceState, onTranscript, researchContext, onIntentPreview, onResearchActivity, onResearchTurnStart }: {
+  onBusyChange?: (busy: boolean) => void;
+  variant?: keyof typeof SESSION_VARIANTS;
+  research?: boolean;
+  compact?: boolean;
+  onResearchRun?: (runId: string) => void;
+  onVoiceState?: (state: string) => void;
+  onTranscript?: (text: string) => void;
+  onIntentPreview?: (event: ResearchIntentPreview) => void;
+  onResearchActivity?: (event: ResearchActivity) => void;
+  onResearchTurnStart?: () => void;
+  researchContext?: { sourceIds: string[]; pastedText: string; pastedKind: "paper" | "code"; sessionId: string; previousRunId: string | null; searchEnabled: boolean };
+}) {
+  const baseSettings = SESSION_VARIANTS[variant];
+  const settings = research ? { ...baseSettings,
+    healthEndpoint: "/api/research/voice/health", offerEndpoint: "/api/research/voice/offer",
+    startLabel: "Start voice", readyLabel: "Ready to investigate",
+    liveDescription: "Ask a research question. Follow the evidence as the agents work.",
+  } : baseSettings;
+  const researchCallbacks = useRef({ onResearchRun, onVoiceState, onTranscript, onIntentPreview, onResearchActivity, onResearchTurnStart });
+  researchCallbacks.current = { onResearchRun, onVoiceState, onTranscript, onIntentPreview, onResearchActivity, onResearchTurnStart };
+  const contextBody = JSON.stringify(researchContext || { sourceIds: [], pastedText: "", pastedKind: "paper", searchEnabled: true, previousRunId: null });
+  const contextRef = useRef(contextBody);
+  contextRef.current = contextBody;
   const mounted = useRef(true);
   const generation = useRef(0);
   const phaseRef = useRef<Phase>("idle");
@@ -75,6 +110,7 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
   const [problem, setProblem] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [userSpeaking, setUserSpeaking] = useState(false);
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [lines, setLines] = useState<PipecatLine[]>([]);
 
@@ -117,6 +153,21 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
     }
   }, [settings.healthEndpoint]);
 
+  useEffect(() => {
+    researchCallbacks.current.onVoiceState?.(problem ? "error" : speaking ? "speaking" : phase === "connected" && !muted ? "listening" : phase === "connecting" ? "connecting" : "idle");
+  }, [phase, muted, speaking, userSpeaking, problem]);
+
+  useEffect(() => {
+    if (!research || phase !== "connected") return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void fetch("/api/research/context", { method: "POST", headers: { "Content-Type": "application/json" }, body: contextBody, signal: controller.signal })
+        .then(response => { if (!response.ok) throw new Error(); })
+        .catch(() => { if (!controller.signal.aborted && mounted.current) setProblem("The voice source selection could not update. End voice and start it again before asking about the new excerpt."); });
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [contextBody, phase, research]);
+
   const end = useCallback((reason?: string): Promise<void> => {
     if (reason && mounted.current) setProblem(reason);
     if (stopInFlight.current) return stopInFlight.current;
@@ -125,7 +176,7 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
     setPhase("stopping");
     const audio = audioRef.current;
     if (audio) { audio.pause(); audio.srcObject = null; }
-    if (mounted.current) { setSpeaking(false); setAudioBlocked(false); }
+    if (mounted.current) { setSpeaking(false); setUserSpeaking(false); setAudioBlocked(false); }
     if (pending) { pending.cancelConnection(); stopTracks(pending.client); }
     const cleanup = async () => {
       let clean = true;
@@ -179,6 +230,8 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
     setAudioBlocked(false);
     setPhase("connecting");
     let userUtterance = 0;
+    let researchCommittedText = "";
+    if (research) researchCallbacks.current.onResearchTurnStart?.();
     let anonymousSegment = 0;
     let connectTimeout: ReturnType<typeof setTimeout> | undefined;
     let mediaOwner: DailyCall | undefined;
@@ -199,6 +252,26 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
         onError: (message) => { if (isCurrent()) void end(pipecatErrorMessage(message)); },
         onBotStartedSpeaking: () => { if (isCurrent()) setSpeaking(true); },
         onBotStoppedSpeaking: () => { if (isCurrent()) setSpeaking(false); },
+        onUserStartedSpeaking: () => {
+          if (!isCurrent()) return;
+          setUserSpeaking(true);
+          if (research) { researchCommittedText = ""; researchCallbacks.current.onResearchTurnStart?.(); }
+        },
+        onUserStoppedSpeaking: () => { if (isCurrent()) setUserSpeaking(false); },
+        onServerMessage: (data) => {
+          if (!isCurrent() || !research || !data || typeof data !== "object") return;
+          if (data.type === "research.intent" && ["pending", "ready", "error"].includes(String(data.phase)) && typeof data.transcript === "string") {
+            researchCallbacks.current.onIntentPreview?.(data as unknown as ResearchIntentPreview);
+          }
+          if (data.type === "research.activity" && typeof data.message === "string") {
+            researchCallbacks.current.onResearchActivity?.({ message: data.message, ...(typeof data.at === "string" ? { at: data.at } : {}) });
+          }
+          if (data.type === "research.started" && typeof data.runId === "string") {
+            const currentContext = JSON.parse(contextRef.current);
+            if (!data.sessionId || data.sessionId === currentContext.sessionId) researchCallbacks.current.onResearchRun?.(data.runId);
+          }
+          if (data.type === "research.error") setProblem("Research could not start. Check the research setup and try again.");
+        },
         onTrackStarted: (track, participant) => {
           if (!isCurrent()) { track.stop(); return; }
           if (participant?.local || track.kind !== "audio") return;
@@ -216,6 +289,11 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
           if (!isCurrent() || !data.text.trim()) return;
           const event = { type: "user" as const, id: String(userUtterance), text: data.text, final: data.final };
           setLines((previous) => updatePipecatTranscript(previous, event));
+          const fragment = data.text.trim();
+          const assembled = !researchCommittedText || fragment === researchCommittedText || fragment.startsWith(researchCommittedText + " ")
+            ? fragment : `${researchCommittedText} ${fragment}`;
+          researchCallbacks.current.onTranscript?.(research ? assembled : fragment);
+          if (research && data.final) researchCommittedText = assembled;
           if (data.final) userUtterance += 1;
         },
         onBotOutput: (data) => {
@@ -247,6 +325,11 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
       try {
         await client.initDevices();
         if (!isCurrent()) return;
+        if (research) {
+          const saved = await fetch("/api/research/context", { method: "POST", headers: { "Content-Type": "application/json" }, body: contextRef.current, signal: AbortSignal.timeout(5000) });
+          if (!saved.ok) throw new Error("Research sources could not be selected");
+          if (!isCurrent()) return;
+        }
         const deadline = new Promise<never>((_, reject) => {
           connectTimeout = setTimeout(() => reject(new Error("Connection timeout")), 45_000);
         });
@@ -293,6 +376,20 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat" }: { 
   const active = phase !== "idle";
   const title = phase === "connecting" ? "Connecting the pipeline" : phase === "stopping" ? "Ending the session" : connected ? muted ? "Microphone muted" : speaking ? "Assistant is speaking" : "Listening to you" : health?.configured ? settings.readyLabel : "Set up the voice pipeline";
   const description = phase === "connecting" ? "Allow microphone access. Connecting to the local Pipecat server." : phase === "stopping" ? "Releasing audio. Dismiss any open microphone permission dialog to finish." : connected ? settings.liveDescription : "Start the Python server and check its configuration, then start your microphone.";
+
+  if (compact) return <div className="research-voice">
+    <audio ref={audioRef} autoPlay hidden />
+    <div className="research-voice-controls">
+      {phase === "idle" ? <button className="research-voice-start" onClick={start} disabled={!health?.configured || checking}>◉ {settings.startLabel}</button> : <>
+        <button className="research-voice-start" disabled={!connected} onClick={toggleMute}>{connected ? muted ? "Unmute microphone" : "Mute microphone" : phase === "connecting" ? "Connecting…" : "Ending…"}</button>
+        <button className="research-voice-end" onClick={() => void end()} disabled={phase === "stopping"}>End voice</button>
+      </>}
+      {!active && <button className="research-voice-refresh" onClick={() => void refreshHealth()} disabled={checking} aria-label="Recheck voice setup">↻</button>}
+      {audioBlocked && connected && <button onClick={enablePlayback}>Enable audio</button>}
+    </div>
+    <p className="research-voice-caption" aria-live="polite">{connected ? speaking ? "Speaking" : muted ? "Microphone muted" : userSpeaking ? "Hearing you…" : "Listening · ask a research question" : checking ? "Checking voice…" : health?.configured ? "Gradium voice · microphone starts on click" : "Voice needs configuration · typed research is available below"}</p>
+    {(problem || healthProblem || (health && !health.configured)) && <details className="research-voice-problem"><summary>Voice setup</summary><p>{problem || healthProblem || (health?.missing.length ? `Configure ${health.missing.join(", ")} in practice/.env.local and restart the Python server.` : "Check the Python server configuration.")}</p></details>}
+  </div>;
 
   return <>
     <audio ref={audioRef} autoPlay hidden />

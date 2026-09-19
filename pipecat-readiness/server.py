@@ -57,13 +57,14 @@ class PatchBody(BaseModel):
 class SessionManager:
     """Serialize signaling and keep at most one billable pipeline alive."""
 
-    def __init__(self, handler, session_factory: Callable):
+    def __init__(self, handler, session_factory: Callable, research=None):
         self.handler = handler
         self.session_factory = session_factory
         self.session = None
         self.task: asyncio.Task | None = None
         self.active_route = None
         self.lock = asyncio.Lock()
+        self.research = research
 
     @property
     def active_sessions(self):
@@ -101,7 +102,7 @@ class SessionManager:
             async def connected(connection):
                 nonlocal callback_failed
                 try:
-                    session = self.session_factory(connection, config)
+                    session = self.session_factory(connection, config, research=self.research) if route == "research" else self.session_factory(connection, config)
                     self.session = session
                     self.active_route = route
                     self.task = asyncio.create_task(self._run(session), name="practice-voice-session")
@@ -176,15 +177,20 @@ def create_app(*, environment: Mapping[str, str] | None = None, handler=None, se
         from voice_pipeline import VoiceSession
 
         session_factory = VoiceSession
-    manager = SessionManager(handler, session_factory)
+    from research import ResearchRunner, register_research_routes
+    research = ResearchRunner(environment)
+    manager = SessionManager(handler, session_factory, research)
 
     @asynccontextmanager
     async def lifespan(_app):
         yield
         await manager.close()
+        await research.close()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.sessions = manager
+    app.state.research = research
+    register_research_routes(app, research)
 
     @app.middleware("http")
     async def local_proxy_only(request: Request, call_next):
@@ -248,13 +254,25 @@ def create_app(*, environment: Mapping[str, str] | None = None, handler=None, se
     async def gradium_health():
         return route_health(read_gradium_config)
 
+    @app.get("/research/voice/health")
+    async def research_voice_health():
+        result = route_health(read_gradium_config)
+        research_status = research.health()
+        result["missing"] = list(dict.fromkeys(result["missing"] + research_status.get("missing", [])))
+        result["configured"] = result["configured"] and research_status["configured"]
+        if research_status.get("configError"):
+            result["configError"] = research_status["configError"]
+        return result
+
     async def route_offer(body, route):
         try:
-            config = read_gradium_config(environment) if route == "gradium" else read_config(environment)
+            config = read_gradium_config(environment) if route in ("gradium", "research") else read_config(environment)
+            if route == "research" and not research.health()["configured"]:
+                return error_response(503, "MISSING_CONFIG", "Configure the research services first.", research.health().get("missing", []))
         except ConfigurationError as error:
             if error.missing:
                 return error_response(503, "MISSING_CONFIG", str(error), error.missing)
-            hint = "Check GENERALCOMPUTE_BASE_URL, GRADIUM_REGION, and PROVIDER_TIMEOUT_MS." if route == "gradium" else "Check SAMBANOVA_BASE_URL and PROVIDER_TIMEOUT_MS."
+            hint = "Check GENERALCOMPUTE_BASE_URL, GRADIUM_REGION, and PROVIDER_TIMEOUT_MS." if route in ("gradium", "research") else "Check SAMBANOVA_BASE_URL and PROVIDER_TIMEOUT_MS."
             return error_response(503, "INVALID_CONFIG", hint)
         try:
             return await manager.offer(body, config, route)
@@ -275,6 +293,10 @@ def create_app(*, environment: Mapping[str, str] | None = None, handler=None, se
     async def gradium_offer(body: OfferBody):
         return await route_offer(body, "gradium")
 
+    @app.post("/research/voice/offer")
+    async def research_offer(body: OfferBody):
+        return await route_offer(body, "research")
+
     async def route_patch(body, route):
         try:
             await manager.patch(body, route)
@@ -291,6 +313,10 @@ def create_app(*, environment: Mapping[str, str] | None = None, handler=None, se
     @app.patch("/api/gradium/offer")
     async def gradium_patch(body: PatchBody):
         return await route_patch(body, "gradium")
+
+    @app.patch("/research/voice/offer")
+    async def research_patch(body: PatchBody):
+        return await route_patch(body, "research")
 
     return app
 

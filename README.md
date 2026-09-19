@@ -1,4 +1,10 @@
-# Voice AI hackathon practice
+# Research Orb + voice AI starter
+
+**Research Orb is the app at [http://127.0.0.1:3000](http://127.0.0.1:3000).** Ask a question by text or Gradium voice, watch Jev select the analysis, and read a cited report from two General Compute specialists using the prepared Paper2Agent material. Open cited excerpts, follow up, cancel, or export Markdown. The original voice playground is preserved at `/practice`.
+
+See [Research Orb setup and verification](docs/research.md) for the required keys, two-process startup, live smoke checks, and supported source scope. Both Next.js and the Python backend must run. This is a local MVP with in-memory research history; new paper conversion and arbitrary repository execution are outside its scope.
+
+## Original starter notes
 
 This workspace implements the **preparation** checklist in [voice-ai-hackathon-agent-checklist.md](voice-ai-hackathon-agent-checklist.md). It is not the official event starter or a completed hackathon submission. Initial preparation was recorded on September 18, 2026; the third provider stack was added on September 19. Confirm reuse rules before porting any code.
 
