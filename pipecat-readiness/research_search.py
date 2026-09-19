@@ -103,7 +103,48 @@ async def _request(client, endpoint, payload, api_key):
     return data["results"]
 
 
-async def acquire_sources(question, api_key, emit, *, urls=None, http=None):
+def result_links(result):
+    """Keep bounded public links before excerpt truncation, including Exa extras."""
+    values = []
+
+    def collect(value):
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            for item in value[:64]:
+                collect(item)
+        elif isinstance(value, dict):
+            for key in ("url", "href", "link"):
+                collect(value.get(key))
+
+    extras = result.get("extras")
+    if isinstance(extras, dict):
+        collect(extras.get("links"))
+    collect(result.get("links"))
+    subpages = result.get("subpages")
+    for child in (subpages[:16] if isinstance(subpages, list) else []):
+        if isinstance(child, dict):
+            collect(child.get("url"))
+    # Exa's complete response is already capped at 2 MB. Scan the complete
+    # returned text so references beyond the displayed 3.2k excerpt survive.
+    text = result.get("text")
+    if isinstance(text, str):
+        values.extend(re.findall(r"https?://[^\s<>\"']+", text)[:128])
+    output = []
+    for value in values:
+        try:
+            url = public_url(value.rstrip(").,;]}"))
+        except ExaSearchError:
+            continue
+        if url not in output:
+            output.append(url)
+        if len(output) == 64:
+            break
+    return output
+
+
+async def acquire_sources(question, api_key, emit, *, urls=None, http=None,
+                          candidates=None, allow_empty=False, include_domains=None):
     """Search publications or extract supplied URLs, returning at most 16k evidence chars.
 
     Search/extraction is one Exa request, so discoveries become visible when its
@@ -124,6 +165,19 @@ async def acquire_sources(question, api_key, emit, *, urls=None, http=None):
         "query": question.strip(), "category": "publication", "numResults": 5,
         "contents": {"text": True},
     }
+    if candidates is not None:
+        # Metadata is kept separately from evidence; a PDF can be prepared even
+        # when Exa cannot extract text from its landing page.
+        if requested:
+            payload["extras"] = {"links": 32}
+        else:
+            payload["contents"]["extras"] = {"links": 32}
+    if include_domains and not requested:
+        if not isinstance(include_domains, (list, tuple)) or any(
+                not isinstance(domain, str) or not re.fullmatch(r"[a-z0-9.-]+", domain)
+                for domain in include_domains):
+            raise ExaSearchError("invalid_query", "Use a valid publication domain filter.")
+        payload["includeDomains"] = list(include_domains)[:8]
     emit("search.started", query=question.strip(), provider="Exa", mode="url" if requested else "search")
     if requested:
         for url in requested:
@@ -162,6 +216,15 @@ async def acquire_sources(question, api_key, emit, *, urls=None, http=None):
         emit("search.result", result={"title": title, "url": url, "author": author,
                                       "publishedDate": date, "status": "discovered"})
         text = _source_text(result.get("text"))
+        candidate = None
+        if candidates is not None:
+            candidate = {"candidateId": "C" + sha256(url.encode()).hexdigest()[:12],
+                         "originResultId": _label(result.get("id"), 2048) or url,
+                         "url": url, "title": title, "author": author,
+                         "publishedDate": date, "links": result_links(result),
+                         "textStatus": "available" if text is not None else "unavailable",
+                         "sourceId": None}
+            candidates.append(candidate)
         if text is None or remaining < 120:
             emit("source.fetch.completed", url=url, title=title, status="unavailable",
                  message="No usable extracted text was returned.")
@@ -179,9 +242,11 @@ async def acquire_sources(question, api_key, emit, *, urls=None, http=None):
                   "author": author, "publishedDate": date, "coverage": coverage,
                   "sha256": sha256(content.encode()).hexdigest()}
         sources.append(source)
+        if candidate is not None:
+            candidate["sourceId"] = source["id"]
         emit("source.fetch.completed", url=url, title=title, sourceId=source["id"],
              status="ready", coverage=coverage, characters=len(content))
     emit("search.completed", count=discovered, usableCount=len(sources), provider="Exa")
-    if not sources:
+    if not sources and not allow_empty:
         raise ExaSearchError("no_content", "No readable paper text was found. Try a specific title, an open-access paper URL, or paste an excerpt.")
     return sources

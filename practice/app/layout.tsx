@@ -8,5 +8,6 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+  // Browser scripts can add root attributes (for example, class="hydrated") before React starts.
+  return <html lang="en" suppressHydrationWarning><body>{children}</body></html>;
 }

@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import ResearchLibrary from "./ResearchLibrary";
 import ResearchOrb, { type OrbState } from "./ResearchOrb";
 import ResearchMarkdown from "./ResearchMarkdown";
 import type { ResearchIntentPreview, ResearchActivity } from "./PipecatSession";
@@ -9,9 +10,10 @@ import "./research.css";
 
 const PipecatSession = dynamic(() => import("./PipecatSession"), { ssr: false, loading: () => <div className="research-voice-loading">Preparing voice controls…</div> });
 type Source = { id: string; title: string; kind?: string; description?: string; section?: string; text?: string; url?: string; path?: string; coverage?: string };
-type Health = { configured: boolean; missing: string[]; sources: Source[]; configError?: string; activeRunId?: string | null; latestRunId?: string | null; activeSessionId?: string | null; latestSessionId?: string | null; search?: { configured: boolean; provider: string } };
+type Health = { configured: boolean; missing: string[]; sources: Source[]; configError?: string; activeRunId?: string | null; latestRunId?: string | null; activeSessionId?: string | null; latestSessionId?: string | null; search?: { configured: boolean; provider: string }; paper2agent?: { available: boolean; mode: "draft"; supported: "arxiv" } };
 type SearchResult = { title: string; url: string; author?: string; publishedDate?: string; status: string; message?: string };
-type Agent = { state: "waiting" | "working" | "complete" | "failed"; text: string };
+type PaperPreparation = { state: "working" | "complete" | "failed" | "stopped"; message: string; title?: string; sourceId?: string; cacheHit?: boolean };
+type Agent = { title?: string; state: "waiting" | "working" | "complete" | "failed" | "stopped"; text: string };
 type RunEvent = { runId: string; seq: number; at: string; type: string; payload: Record<string, unknown> };
 type Routing = { answers?: Record<string, unknown>; model?: string; profile?: string; [key: string]: unknown };
 const INITIAL_AGENTS: Record<string, Agent> = { evidence: { state: "waiting", text: "" }, critic: { state: "waiting", text: "" } };
@@ -38,7 +40,7 @@ function SourceDrawer({ source, onClose }: { source: Source; onClose: () => void
   </dialog>;
 }
 
-function AgentCard({ id, agent, onSource }: { id: "evidence" | "critic"; agent: Agent; onSource: (id: string) => void }) {
+function AgentCard({ id, agent, onSource }: { id: string; agent: Agent; onSource: (id: string) => void }) {
   const viewport = useRef<HTMLDivElement>(null);
   const followOutput = useRef(true);
   useEffect(() => {
@@ -48,14 +50,14 @@ function AgentCard({ id, agent, onSource }: { id: "evidence" | "critic"; agent: 
   return <article className={`research-agent-card agent-${agent.state}`}>
     <header className="research-agent-heading">
       <div className="research-agent-icon"><Icon name={id === "evidence" ? "paper" : "spark"} size={17} /></div>
-      <div className="research-agent-title"><h3>{id === "evidence" ? "Evidence Analyst" : "Critical Reader"}</h3><p>{id === "evidence" ? "Methods, evidence & implementation" : "Limitations, gaps & counterevidence"}</p></div>
+      <div className="research-agent-title"><h3>{agent.title || (id === "evidence" ? "Evidence Analyst" : "Critical Reader")}</h3><p>{agent.title ? "Paper agent · evidence and limitations" : id === "evidence" ? "Methods, evidence & implementation" : "Limitations, gaps & counterevidence"}</p></div>
       <span className="research-agent-state" title={agent.state}>{agent.state === "complete" ? <Icon name="check" size={14} /> : agent.state === "working" ? <span className="research-small-spinner" /> : agent.state === "failed" ? "!" : "·"}</span>
     </header>
-    <div className="research-agent-findings" ref={viewport} tabIndex={0} aria-label={`${id === "evidence" ? "Evidence Analyst" : "Critical Reader"} findings`} onScroll={() => { const el = viewport.current; if (el) followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 70; }}>
+    <div className="research-agent-findings" ref={viewport} tabIndex={0} aria-label={`${agent.title || (id === "evidence" ? "Evidence Analyst" : "Critical Reader")} findings`} onScroll={() => { const el = viewport.current; if (el) followOutput.current = el.scrollHeight - el.scrollTop - el.clientHeight < 70; }}>
       {agent.text ? <ResearchMarkdown text={agent.text} onSource={onSource} /> : <p>{agent.state === "working" ? "Reading the supplied evidence. Findings will stream here as they arrive." : "Waiting for a research question. Live findings will appear here."}</p>}
       {agent.state === "working" && <span className="research-writing-cursor" aria-label="Agent is analyzing" />}
     </div>
-    <div className="research-agent-footer"><span>{agent.state === "working" ? "Streaming findings" : agent.state === "complete" ? "Analysis complete" : agent.state === "failed" ? "Analysis unavailable" : "Awaiting question"}</span><span>{agent.text ? "Scroll to explore" : "Awaiting evidence"}</span></div>
+    <div className="research-agent-footer"><span>{agent.state === "working" ? "Streaming findings" : agent.state === "complete" ? "Analysis complete" : agent.state === "failed" ? "Analysis unavailable" : agent.state === "stopped" ? "Analysis stopped · partial output" : "Awaiting question"}</span><span>{agent.text ? "Scroll to explore" : "Awaiting evidence"}</span></div>
   </article>;
 }
 
@@ -66,6 +68,13 @@ export default function ResearchWorkspace() {
   const [question, setQuestion] = useState("");
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [searchEnabled, setSearchEnabled] = useState(true);
+  const [paper2agentEnabled, setPaper2agentEnabled] = useState(true);
+  const [selectedPaperIds, setSelectedPaperIds] = useState<string[]>([]);
+  const [libraryVersion, setLibraryVersion] = useState(0);
+  const [paperAgents, setPaperAgents] = useState<Record<string, Agent>>({});
+  const [paperJobs, setPaperJobs] = useState<Record<string, string>>({});
+  const [viewingHistory, setViewingHistory] = useState(false);
+  const [paperPreparation, setPaperPreparation] = useState<PaperPreparation | null>(null);
   const [sessionId, setSessionId] = useState("");
   const sessionRef = useRef("");
   const [previousRunId, setPreviousRunId] = useState<string | null>(null);
@@ -75,7 +84,7 @@ export default function ResearchWorkspace() {
   const [pastedText, setPastedText] = useState("");
   const [pastedKind, setPastedKind] = useState<"paper" | "code">("paper");
   const [showPaste, setShowPaste] = useState(false);
-  const researchContext = useMemo(() => ({ sourceIds: selectedSources, pastedText, pastedKind, searchEnabled, sessionId, previousRunId }), [selectedSources, pastedText, pastedKind, searchEnabled, sessionId, previousRunId]);
+  const researchContext = useMemo(() => ({ sourceIds: selectedSources, pastedText, pastedKind, searchEnabled, paper2agentEnabled, paperIds: selectedPaperIds, sessionId, previousRunId }), [selectedPaperIds, selectedSources, pastedText, pastedKind, searchEnabled, paper2agentEnabled, sessionId, previousRunId]);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<OrbState>("idle");
   const [voiceState, setVoiceState] = useState("idle");
@@ -160,11 +169,15 @@ export default function ResearchWorkspace() {
   }, []);
 
   const stopPendingSearch = useCallback((state: "failed" | "stopped") => {
+    const stop = (items: Record<string, Agent>) => Object.fromEntries(Object.entries(items).map(([id, agent]) => [id, agent.state === "working" ? { ...agent, state, text: agent.text || "Analysis ended before findings were available." } : agent]));
+    setPaperAgents(stop); setAgents(stop);
     setSearchState((current) => current === "searching" || current === "reading" ? state : current);
     setSearchResults((items) => items.map((item) => item.status === "reading" ? { ...item, status: "stopped" } : item));
+    setPaperPreparation((current) => current?.state === "working" ? { ...current, state, message: state === "stopped" ? "Paper preparation stopped." : "Paper preparation could not complete." } : current);
   }, []);
 
-  const followRun = useCallback((id: string) => {
+  const followRun = useCallback((id: string, history = false) => {
+    setViewingHistory(history);
     if (activeRun.current === id && events.current) return;
     events.current?.close();
     if (streamDeadline.current) clearTimeout(streamDeadline.current);
@@ -175,7 +188,7 @@ export default function ResearchWorkspace() {
     startedAt.current = Date.now();
     setElapsed(0); setRunId(id); setBusy(true); setStage("routing"); setRouting(null); setAgents(INITIAL_AGENTS);
     setReport(""); setReportDone(false); setReportPartial(false); setVerification(""); setSources([]); setProblem(""); setNotice(""); setActivity([]);
-    setSearchQuery(""); setSearchState("idle"); setSearchResults([]); setRunQuestion("");
+    setSearchQuery(""); setSearchState("idle"); setSearchResults([]); setPaperPreparation(null); setRunQuestion(""); setPaperAgents({}); setPaperJobs({});
     const stream = new EventSource(`/api/research/runs/${encodeURIComponent(id)}/events`);
     events.current = stream;
     const finishStream = () => { stream.close(); if (events.current === stream) events.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); };
@@ -184,7 +197,7 @@ export default function ResearchWorkspace() {
       finishStream(); stopPendingSearch("failed"); setBusy(false); setStage("error"); setReportPartial(true);
       setProblem("The research stream timed out. Any visible findings are partial. Retry your question to start a fresh run.");
       void fetch(`/api/research/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
-    }, 115_000);
+    }, 375_000);
     stream.onmessage = (message) => {
       if (activeRun.current !== id || !mounted.current) return;
       let event: RunEvent;
@@ -197,6 +210,25 @@ export default function ResearchWorkspace() {
       const agentId = String(p.agent || "evidence");
       const log = (label: string) => setActivity((items) => [...items.slice(-5), { label, at: event.at }]);
       switch (event.type) {
+        case "paper.routing": setWorkLabel(`${String(p.action || "Paper conversation").replace(/_/g, " ")}: retrieving the relevant evidence`); log("Jev selected paper targets"); break;
+        case "paper.selection.started": setWorkLabel("Jev is choosing the relevant papers"); log("Evaluating discovered paper identities"); break;
+        case "paper.selection.completed": log("Jev selected relevant papers"); break;
+        case "paper.selection.failed": setNotice(String(p.message || "PDF selection was unavailable.")); break;
+        case "paper.selected": setLibraryVersion((v) => v + 1); log(`Selected ${String(p.title || "a paper")}`); break;
+        case "memory.retrieved": setWorkLabel(String(p.message)); log("Retrieved saved paper evidence and conversation memory"); break;
+        case "paper.agent.started": setStage("analyzing"); setWorkLabel(`Reading ${String(p.title || "a paper")}`); setPaperAgents((items) => ({ ...items, [String(p.paperId)]: { title: String(p.title), state: "working", text: "" } })); break;
+        case "paper.agent.delta": setPaperAgents((items) => ({ ...items, [String(p.paperId)]: { title: String(p.title), state: "working", text: (items[String(p.paperId)]?.text || "") + text } })); break;
+        case "paper.agent.completed": setPaperAgents((items) => ({ ...items, [String(p.paperId)]: { title: String(p.title), state: "complete", text } })); log(`Paper agent finished: ${String(p.title)}`); break;
+        case "paper.agent.failed": setPaperAgents((items) => ({ ...items, [String(p.paperId)]: { title: String(p.title), state: "failed", text: String(p.message || "Paper analysis failed.") } })); break;
+        case "paper.failed": setNotice(String(p.message || "This paper could not be read.")); break;
+        case "repo.discovered":
+        case "repo.cloned":
+        case "repo.cached":
+        case "compute.checked":
+        case "experiment.blocked":
+          setPaperJobs((items) => ({ ...items, [String(p.paperId)]: String(p.reason || p.message || event.type.replace(/\./g, " ")) }));
+          setLibraryVersion((v) => v + 1); log(String(p.message || p.reason || event.type.replace(/\./g, " "))); break;
+        case "workspace.progress": setWorkLabel(String(p.message || "Saving workspace")); break;
         case "run.started": setRunQuestion(String(p.question || "Voice research question")); log("Research request received"); break;
         case "routing.started": setStage("routing"); setWorkLabel("Jev is understanding and routing your question"); log("Jev is classifying the request"); break;
         case "routing.completed": setRouting(p as Routing); setStage("analyzing"); setWorkLabel(p.acquisition === "search" ? "Finding papers and source text with Exa" : "Reading the selected source excerpts"); log("Jev selected an analysis profile"); break;
@@ -219,9 +251,20 @@ export default function ResearchWorkspace() {
           setSearchResults((items) => items.map((item) => item.url === url ? { ...item, status: p.status === "unavailable" || p.usable === false || p.success === false ? "unavailable" : "extracted", message: typeof p.message === "string" ? p.message : undefined } : item));
           log(`Source extraction ${p.status === "unavailable" || p.usable === false || p.success === false ? "unavailable" : "completed"}`); break;
         }
+        case "paper2agent.started":
+        case "paper2agent.progress":
+        case "paper2agent.completed":
+        case "paper2agent.failed": {
+          const state = event.type === "paper2agent.completed" ? "complete" : event.type === "paper2agent.failed" ? "failed" : "working";
+          const message = String(p.message || (state === "complete" ? "Unreviewed paper draft prepared." : state === "failed" ? "Paper preparation unavailable. Continuing with Exa excerpts." : "Preparing the full paper with Paper2Agent."));
+          setPaperPreparation((current) => ({ ...current, state, message, ...(typeof p.title === "string" ? { title: p.title } : {}), ...(typeof p.sourceId === "string" ? { sourceId: p.sourceId } : {}), ...(typeof p.cacheHit === "boolean" ? { cacheHit: p.cacheHit } : {}) }));
+          if (state === "working") { setStage("analyzing"); setWorkLabel(message); }
+          else setWorkLabel(state === "complete" ? "Reading evidence from the prepared paper draft" : "Continuing with the extracted Exa evidence");
+          log(message); break;
+        }
         case "source.read": {
           const source = (p.source || p) as Source;
-          if (source.id) setSources((items) => items.some((item) => item.id === source.id) ? items : [...items, source]);
+          if (source.id) setSources((items) => items.some((item) => item.id === source.id) ? items.map((item) => item.id === source.id ? source : item) : [...items, source]);
           log(`Read ${source.title || "a source excerpt"}`); break;
         }
         case "agent.started": setSearchState((value) => value === "reading" ? "complete" : value); setStage("analyzing"); setWorkLabel("Two research agents are examining the evidence"); setAgents((items) => ({ ...items, [agentId]: { state: "working", text: "" } })); log(`${agentId === "critic" ? "Critical Reader" : "Evidence Analyst"} started`); break;
@@ -233,7 +276,7 @@ export default function ResearchWorkspace() {
         case "report.delta": setWorkLabel("Writing your sourced research report"); setReport((current) => current + text); break;
         case "report.completed": setWorkLabel(p.partial ? "A partial report is ready — evidence gaps are marked" : "Your cited research report is ready"); setReport(String(p.markdown || text)); setReportDone(true); setReportPartial(Boolean(p.partial)); log(p.partial ? "Partial report ready" : "Cited report ready"); break;
         case "clarification.required": setWorkLabel("A little more context will help"); setNotice(String(p.message || p.question || "Add a relevant source or excerpt to continue.")); break;
-        case "run.completed": setPreviousRunId(id); setBusy(false); setStage("idle"); finishStream(); break;
+        case "run.completed": setLibraryVersion((v) => v + 1); setWorkLabel(p.status === "clarification" ? "Add a little more context to continue" : p.partial ? "Report saved with evidence gaps marked" : "Research complete · report and paper workspace saved"); stopPendingSearch("stopped"); setPreviousRunId(id); setBusy(false); setStage("idle"); finishStream(); break;
         case "run.cancelled": stopPendingSearch("stopped"); setWorkLabel("Research stopped — partial findings remain below"); setBusy(false); setStage("idle"); setNotice("Research cancelled. Any findings below are partial."); finishStream(); break;
         case "run.failed": stopPendingSearch("failed"); setWorkLabel("Research paused — review the message below"); setBusy(false); setStage("error"); setReportPartial(true); setProblem(String(p.message || p.error || "The research run could not finish. Please retry.")); finishStream(); break;
       }
@@ -257,7 +300,7 @@ export default function ResearchWorkspace() {
       if (stored?.sessionId === ownedSession && typeof stored.runId === "string") ownedRun = stored.runId;
     } catch { /* A fresh session is still usable without persistence. */ }
     sessionRef.current = ownedSession; setSessionId(ownedSession);
-    if (ownedRun && !activeRun.current) followRun(ownedRun);
+    if (ownedRun && !activeRun.current) followRun(ownedRun, true);
   }, [followRun]);
 
   useEffect(() => {
@@ -285,12 +328,21 @@ export default function ResearchWorkspace() {
     sessionRef.current = freshSession; setSessionId(freshSession);
     try { sessionStorage.setItem(SESSION_KEY, freshSession); sessionStorage.removeItem(RUN_KEY); } catch { /* Persistence is optional. */ }
     activeRun.current = null; setRunId(null); setPreviousRunId(null); setRunQuestion("");
-    setQuestion(""); setSelectedSources([]); setPastedText(""); setSearchEnabled(true); setShowPaste(false);
+    setQuestion(""); setSelectedSources([]); setPastedText(""); setSearchEnabled(true); setPaper2agentEnabled(true); setSelectedPaperIds([]); setPaperAgents({}); setPaperJobs({}); setViewingHistory(false); setPaperPreparation(null); setShowPaste(false);
     setSearchQuery(""); setSearchState("idle"); setSearchResults([]); setSources([]); setSourceDrawer(null);
     setReport(""); setReportDone(false); setReportPartial(false); setVerification(""); setAgents(INITIAL_AGENTS);
     setRouting(null); setIntentPreview(null); setPreviewSubmitted(false); setTranscript(""); setProblem(""); setNotice(""); setActivity([]);
     setElapsed(0); setStage("idle"); setWorkLabel("Waiting for your research question");
     handleResearchTurnStart(); questionInput.current?.focus();
+  };
+
+  const resumeSession = (savedSession: string, savedRun?: string) => {
+    if (busy) return;
+    newResearch();
+    sessionRef.current = savedSession; setSessionId(savedSession);
+    try { sessionStorage.setItem(SESSION_KEY, savedSession); } catch { /* Optional tab recovery. */ }
+    if (savedRun) { setPreviousRunId(savedRun); followRun(savedRun, true); }
+    setLibraryVersion((v) => v + 1);
   };
 
   const submit = async (event: FormEvent) => {
@@ -299,7 +351,7 @@ export default function ResearchWorkspace() {
     submitting.current = true; setBusy(true); setStage("routing"); setProblem(""); setNotice("");
     startedAt.current = Date.now(); setElapsed(0);
     try {
-      const response = await fetch("/api/research/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), question: question.trim(), sourceIds: selectedSources, pastedText: pastedText.trim(), pastedKind, sessionId, searchEnabled, previousRunId }), signal: AbortSignal.timeout(15_000) });
+      const response = await fetch("/api/research/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientRequestId: crypto.randomUUID(), question: question.trim(), sourceIds: selectedSources, pastedText: pastedText.trim(), pastedKind, sessionId, searchEnabled, paper2agentEnabled, paperIds: selectedPaperIds, previousRunId }), signal: AbortSignal.timeout(15_000) });
       const data = await response.json();
       if (!response.ok || !data.runId) throw new Error(data.error?.message || (typeof data.error === "string" ? data.error : typeof data.detail === "string" ? data.detail : "Could not start research. Check the research server and configuration."));
       if (mounted.current) { setRunQuestion(question.trim()); followRun(data.runId); }
@@ -366,6 +418,7 @@ export default function ResearchWorkspace() {
             <div className="research-input-wrap"><textarea id="research-question" ref={questionInput} value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What would you like to investigate?" maxLength={4000} rows={3} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><div className="research-input-actions"><button type="button" className="research-add-source" onClick={() => setShowPaste(!showPaste)} aria-expanded={showPaste}><span>{showPaste ? "−" : "+"}</span> Add excerpt</button><button type="submit" className="research-submit" disabled={busy || !question.trim()}>{busy ? "Researching…" : "Investigate"}<Icon name="arrow" size={17} /></button></div></div>
             {showPaste && <div className="research-paste"><div className="research-paste-heading"><label htmlFor="research-excerpt">Source excerpt</label><select aria-label="Excerpt type" value={pastedKind} onChange={(event) => setPastedKind(event.target.value as "paper" | "code")}><option value="paper">Paper / text</option><option value="code">Code</option></select></div><textarea id="research-excerpt" value={pastedText} onChange={(event) => setPastedText(event.target.value)} placeholder="Paste a paper excerpt or code to analyze alongside the selected sources…" maxLength={24000} rows={5} /><span>{pastedText.length.toLocaleString()} / 24,000 characters · excerpt only</span></div>}
             <label className="research-search-toggle"><input type="checkbox" checked={searchEnabled} onChange={(event) => setSearchEnabled(event.target.checked)} /><span><strong>Search for papers</strong><small>{health?.search?.configured === false ? "Exa needs configuration · supplied sources still work" : "Exa finds papers and extracts readable source text"}</small></span><span className="research-search-provider">EXA</span></label>
+            <label className={`research-search-toggle research-prepare-toggle ${!health?.paper2agent?.available ? "is-unavailable" : ""}`}><input type="checkbox" checked={paper2agentEnabled} disabled={busy || !health?.paper2agent?.available} onChange={(event) => setPaper2agentEnabled(event.target.checked)} /><span><strong>Prepare full paper</strong><small>{health?.paper2agent?.available ? "Jev selects up to two arXiv papers · unreviewed drafts" : "Paper2Agent preparation is unavailable on this server"}</small></span><span className="research-search-provider">DRAFT</span></label>
             <div className="research-sources-heading"><span>OPTIONAL PREPARED CONTEXT</span><span>{selectedSources.length + (pastedText.trim() ? 1 : 0)} selected</span></div>
             <div className="research-source-options">{sourceOptions.map((source) => <label className={`research-source-option ${selectedSources.includes(source.id) ? "is-selected" : ""}`} key={source.id}><input type="checkbox" checked={selectedSources.includes(source.id)} onChange={() => setSelectedSources((items) => items.includes(source.id) ? items.filter((id) => id !== source.id) : [...items, source.id])} /><Icon name={source.kind === "code" || source.id.endsWith("code") ? "code" : "paper"} size={16} /><span>{source.title}</span><span className="research-source-check"><Icon name="check" size={12} /></span></label>)}</div>
             <p className="research-scope-note">{searchEnabled ? "Ask about any research topic. Add a paper URL to your question, or supply an excerpt." : "Search is off. Select a prepared source or paste an excerpt to analyze."}</p>
@@ -373,6 +426,8 @@ export default function ResearchWorkspace() {
           <div className="research-suggestions"><span className="research-eyebrow">A LITTLE CURIOSITY TO GET STARTED</span>{EXAMPLES.map((example) => <button key={example} onClick={() => selectExample(example)} disabled={busy}>{example}<Icon name="arrow" size={14} /></button>)}</div>
         </aside>
         <section className="research-results-column" aria-label="Live research and report">
+          <ResearchLibrary sessionId={sessionId} busy={busy} selectedPaperIds={selectedPaperIds} onSelect={setSelectedPaperIds} onResume={resumeSession} onOpenRun={(id) => { setPreviousRunId(id); followRun(id, true); }} refreshToken={libraryVersion} />
+          {viewingHistory && <div className="research-alert" role="status">Saved conversation report. Ask a follow-up to continue with its paper agents.</div>}
           <div className="research-workflow research-surface"><div className="research-surface-heading"><h2><span className="research-live-dot" />Live research</h2><span className="research-workflow-meta">{busy ? `${elapsed}s elapsed` : reportDone ? reportPartial ? "Partial analysis" : "Analysis complete" : "A clear view of the process"}</span>{busy && runId && <button className="research-cancel" onClick={() => void cancel()}>Cancel</button>}</div>
             <div className={`research-live-intent preview-${intentPreview?.phase || "idle"}`}>
               <div className="research-preview-heading"><h3><span className="research-live-dot" />Live intent <span>· provisional</span></h3><span className="research-agent-tag">{previewSubmitted ? "TURN SUBMITTED" : intentPreview?.phase === "pending" ? "UPDATING" : intentPreview?.phase === "ready" ? "LIVE PREVIEW" : intentPreview?.phase === "error" ? "UNAVAILABLE" : "AWAITING SPEECH"}</span></div>
@@ -396,8 +451,15 @@ export default function ResearchWorkspace() {
               <div className="research-search-list">{searchResults.map((result) => <article key={result.url} className="research-search-result"><div><a href={/^https?:\/\//.test(result.url) ? result.url : undefined} target="_blank" rel="noopener noreferrer">{result.title || result.url}<Icon name="arrow" size={12} /></a><small>{[result.author, result.publishedDate?.slice(0, 10)].filter(Boolean).join(" · ") || (() => { try { return new URL(result.url).hostname; } catch { return "Discovered source"; } })()}</small></div><span className={`research-search-status status-${result.status}`}>{result.status === "reading" ? "Reading…" : result.status === "extracted" ? "Text extracted" : result.status === "unavailable" ? "No readable text" : result.status === "stopped" ? "Reading stopped" : "Discovered"}</span></article>)}</div>
               <p className="research-search-note">Discovery is separate from analysis. Only extracted text listed under Sources examined is passed to the agents.</p>
             </section>}
+            {paperPreparation && <section className={`research-paper-preparation preparation-${paperPreparation.state}`} aria-label="Paper2Agent preparation" aria-live="polite">
+              <div className="research-paper-preparation-heading"><h3>Paper2Agent <span>Paper preparation</span></h3><span>{paperPreparation.state === "working" ? <><span className="research-small-spinner" />Preparing</> : paperPreparation.state === "complete" ? paperPreparation.cacheHit ? "Cached draft" : "Draft ready" : paperPreparation.state === "stopped" ? "Stopped" : "Using Exa excerpts"}</span></div>
+              {paperPreparation.title && <p className="research-paper-preparation-title">{paperPreparation.title}</p>}
+              <p>{paperPreparation.message}</p>
+              <small>{paperPreparation.state === "complete" ? "Unreviewed extraction draft. Selected passages inform the analysis; the paper and its claims have not been independently verified." : paperPreparation.state === "working" ? "Preparing the selected paper through Paper2Skill. Each paper agent starts when its evidence is ready." : "Available source excerpts can still be used for the research report."}</small>
+            </section>}
             <div className="research-flow-connector"><span /><small>Evidence → analysis → cited report</small><span /></div>
-            <div className="research-agent-grid">{(["evidence", "critic"] as const).map((id) => <AgentCard key={`${runId || "ready"}-${id}`} id={id} agent={agents[id]} onSource={(source) => void openSource(source)} />)}</div>
+            <div className="research-agent-grid">{Object.keys(paperAgents).length > 0 ? Object.entries(paperAgents).map(([id, agent]) => <AgentCard key={`${runId}-${id}`} id={id} agent={agent} onSource={(source) => void openSource(source)} />) : (["evidence", "critic"] as const).map((id) => <AgentCard key={`${runId || "ready"}-${id}`} id={id} agent={agents[id]} onSource={(source) => void openSource(source)} />)}</div>
+            {Object.entries(paperJobs).map(([id, message]) => <p className="research-search-note" key={id}>{message}</p>)}
             {activity.length > 0 && <div className="research-activity" aria-label="Research activity">{activity.slice(-3).map((item, index) => <div key={`${item.at}-${index}`}><span className="research-activity-dot" /><span>{item.label}</span><time>{new Date(item.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></div>)}</div>}
           </div>
           {problem && <div className="research-alert research-alert-error" role="alert"><strong>Research needs your attention</strong><p>{problem}</p><button onClick={() => { setProblem(""); void refreshHealth(); questionInput.current?.focus(); }}>Review question & retry ↗</button></div>}
@@ -405,7 +467,7 @@ export default function ResearchWorkspace() {
           <article className="research-report research-surface"><div className="research-surface-heading"><h2><Icon name="paper" size={16} />Research report</h2><div className="research-report-tools">{report && <><span className={`research-report-status ${reportDone && !reportPartial ? "is-complete" : ""}`}>{reportDone ? reportPartial ? "PARTIAL" : "COMPLETE" : busy ? "DRAFT" : "PARTIAL"}</span><button className="research-icon-button" title="Copy Markdown" aria-label={copied ? "Markdown copied" : "Copy Markdown"} onClick={() => void copyReport()}><Icon name={copied ? "check" : "copy"} size={15} /></button><button className="research-icon-button" title="Download Markdown" aria-label="Download Markdown" onClick={downloadReport}><Icon name="download" size={16} /></button></>}</div></div>
             {report ? <div className="research-report-content" ref={reportViewport} tabIndex={0} aria-label="Research report content" onScroll={() => { const el = reportViewport.current; if (el) followReport.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90; }}><ResearchMarkdown text={report} onSource={(source) => void openSource(source)} />{busy && !reportDone && <span className="research-writing-cursor" aria-label="Report is streaming" />}</div> : <div className="research-report-empty"><div className="research-empty-document"><span /><span /><span /><span /><i><Icon name="spark" size={19} /></i></div><h3>{busy ? "A thoughtful answer takes evidence." : "Your next insight starts here."}</h3><p>{busy ? `Investigating “${runQuestion || question}”. Your sourced report will appear here as the agents finish their analysis.` : "Ask your first question to turn papers and code into a clear, cited research report."}</p><div className="research-report-features"><span><Icon name="check" size={12} /> Grounded findings</span><span><Icon name="check" size={12} /> Source citations</span><span><Icon name="check" size={12} /> Markdown export</span></div></div>}
             {verification && <div className="research-verification" role="status"><Icon name="spark" size={13} /><span>{verification}</span></div>}
-            {sources.length > 0 && <div className="research-read-sources"><div><span className="research-eyebrow">SOURCES EXAMINED</span><span>{sources.length} excerpts</span></div>{sources.map((source) => <button key={source.id} onClick={() => void openSource(source.id)}><span className="research-source-id">{source.id}</span><span>{source.title}<small>{source.section || source.path || "Read by the research agents"}</small></span><Icon name="arrow" size={14} /></button>)}</div>}
+            {sources.length > 0 && <div className="research-read-sources"><div><span className="research-eyebrow">SOURCES EXAMINED</span><span>{sources.length} excerpts</span></div>{sources.map((source) => <button key={source.id} onClick={() => void openSource(source.id)}><span className="research-source-id" title={source.id}>{source.id.startsWith("P") ? source.id.slice(0, 8) : source.id}</span><span>{source.title}<small>{[source.section || source.path || "Read by the research agents", source.coverage].filter(Boolean).join(" · ")}</small></span><Icon name="arrow" size={14} /></button>)}</div>}
             <div className="research-report-footer"><span className="research-shield">◇</span> Citations point to the excerpts actually analyzed. Excerpts may not cover the full paper.</div>
           </article>
         </section>

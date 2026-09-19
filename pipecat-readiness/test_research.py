@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 import json
 import unittest
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
@@ -90,7 +91,9 @@ class GroundingTests(unittest.TestCase):
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.runner = ResearchRunner(ENV)
+        self.workspace_tmp = TemporaryDirectory()
+        self.addCleanup(self.workspace_tmp.cleanup)
+        self.runner = ResearchRunner({**ENV, "RESEARCH_WORKSPACE_ROOT": self.workspace_tmp.name})
         async def routing(run):
             return validate_routing(DECISION), "jev-latest"
         self.runner._routing = routing
@@ -195,7 +198,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
 class SearchOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.runner = ResearchRunner({**ENV, "EXA_API_KEY": "fixture", "PAPER2AGENT_ROOT": "/missing/offline-source-fixture"})
+        self.workspace_tmp = TemporaryDirectory()
+        self.addCleanup(self.workspace_tmp.cleanup)
+        self.runner = ResearchRunner({**ENV, "RESEARCH_WORKSPACE_ROOT": self.workspace_tmp.name, "EXA_API_KEY": "fixture", "PAPER2AGENT_ROOT": "/missing/offline-source-fixture"})
         self.decision = {**validate_routing(DECISION),
                          "acquisition": {"type": "choice", "choice": "search", "confidence": 0.99,
                                          "probabilities": {"search": 0.99, "provided": 0.005, "clarify": 0.005}}}
@@ -232,6 +237,39 @@ class SearchOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         run = await self.runner.start({"clientRequestId": "url", "question": "Analyze https://arxiv.org/abs/1234.5678.", "sourceIds": []})
         await run.task
         self.assertEqual(self.acquire.await_args.kwargs["urls"], ["https://arxiv.org/abs/1234.5678"])
+
+    async def test_draft_preparation_feeds_generated_passages_to_both_analysts(self):
+        draft = {**self.web_source, "packId": "paper2agent-draft", "text": "Distinct passage from the generated reading package.",
+                 "coverage": "Paper2Agent draft PDF extraction; unreviewed selected passages"}
+        self.runner.paper2agent.prepare = AsyncMock(return_value=[draft])
+        run = await self.runner.start({"clientRequestId": "draft", "question": "Explain the method", "sourceIds": [], "paper2agentEnabled": True})
+        await run.task
+        self.runner.paper2agent.prepare.assert_awaited_once_with([self.web_source], run.question, run.emit)
+        self.assertEqual(run.sources["S1"], draft)
+        self.assertEqual(self.runner._agent.await_count, 2)
+        for call in self.runner._agent.await_args_list:
+            self.assertIn(draft["text"], call.args[3])
+            self.assertNotIn(self.web_source["text"], call.args[3])
+        self.assertIn("Paper2Agent draft: PDF extraction has not passed page-by-page review", run.markdown)
+        self.assertEqual(run.events[-1]["type"], "run.completed")
+
+    async def test_preparation_is_opt_in_and_changes_request_identity(self):
+        self.runner.paper2agent.prepare = AsyncMock(return_value=[self.web_source])
+        payload = {"clientRequestId": "opt-in", "question": "Explain the method", "sourceIds": []}
+        run = await self.runner.start(payload)
+        await run.task
+        self.runner.paper2agent.prepare.assert_not_awaited()
+        with self.assertRaises(ResearchError) as error:
+            await self.runner.start({**payload, "paper2agentEnabled": True})
+        self.assertEqual(error.exception.code, "REQUEST_CONFLICT")
+
+    async def test_preparation_voice_context_and_boolean_validation(self):
+        self.runner.set_voice_context({"sourceIds": [], "paper2agentEnabled": True})
+        self.assertTrue(self.runner.voice_context["paper2agentEnabled"])
+        with self.assertRaises(ResearchError):
+            self.runner.set_voice_context({"sourceIds": [], "paper2agentEnabled": "true"})
+        with self.assertRaises(ResearchError):
+            await self.runner.start({"clientRequestId": "bad", "question": "Explain this", "paper2agentEnabled": 1})
 
     async def test_search_disabled_clarification_is_spoken_before_completion(self):
         observed = []

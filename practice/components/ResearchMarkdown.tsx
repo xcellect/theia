@@ -7,7 +7,7 @@ export default function ResearchMarkdown({ text, onSource }: { text: string; onS
   return <div className="research-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url.startsWith("source://") ? url : defaultUrlTransform(url)} components={{
     a({ href, children }) {
       const sourceMatch = href?.match(/(?:source:\/\/|#source-|\/sources\/)([^/?#]+)/);
-      if (sourceMatch && onSource) return <button className="research-citation" onClick={() => onSource(decodeURIComponent(sourceMatch[1]))}>{children}</button>;
+      if (sourceMatch && onSource) return <button className="research-citation" onClick={() => onSource(decodeURIComponent(sourceMatch[1]))}>{typeof children === "string" ? children.replace(/\bP[a-f0-9]{24}\b/g, id => id.slice(0, 8)) : children}</button>;
       return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
     },
     table({ children }) { return <div className="research-table-scroll"><table>{children}</table></div>; },

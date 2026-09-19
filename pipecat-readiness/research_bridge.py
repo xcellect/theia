@@ -148,7 +148,8 @@ class ResearchTurnProcessor(FrameProcessor):
                     f"Previous answer: {getattr(prior, 'markdown', '')[:3500]}") if prior else ""
         question = re.sub(r"\bpaper\s+(?:to|two|2)\s+agent\b", "Paper2Agent", text, flags=re.I)
         return ResearchRun(f"preview-{turn_id}", question, list(source_ids), pasted_text, pasted_kind, previous,
-                           search_enabled=context["searchEnabled"], session_id=context["sessionId"])
+                           search_enabled=context["searchEnabled"], session_id=context["sessionId"],
+                           paper2agent_enabled=context.get("paper2agentEnabled", False), paper_ids=context.get("paperIds", []))
 
     async def _preview_loop(self, generation, turn_id):
         def current():

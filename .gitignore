@@ -6,7 +6,7 @@
 **/.venv/
 **/__pycache__/
 **/.cache/
+**/.data/
 **/*.tsbuildinfo
 .DS_Store
 artifacts/local/
-

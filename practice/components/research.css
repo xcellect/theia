@@ -1938,6 +1938,18 @@
 .research-search-toggle strong { font-size:12px; font-weight:500; }
 .research-search-toggle small { font-size:10px; line-height:1.5; color:var(--r-muted); margin-top:3px; }
 .research-search-provider { color:#b6a5ed; font-size:9px; letter-spacing:1px; }
+.research-prepare-toggle { margin-top:8px; }
+.research-prepare-toggle.is-unavailable { opacity:.62; }
+.research-prepare-toggle:has(input:disabled) { cursor:default; }
+.research-paper-preparation { margin:18px 20px 0; padding:15px; border:1px solid #3a3451; border-radius:12px; background:#191727; }
+.research-paper-preparation-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; }
+.research-paper-preparation-heading h3 { font-size:12px; font-weight:500; color:#ddd1fa; }
+.research-paper-preparation-heading h3 > span { display:block; margin-top:3px; font-size:9px; font-weight:400; color:#a097b5; }
+.research-paper-preparation-heading > span { display:flex; align-items:center; gap:7px; color:#c1b4df; font-size:10px; }
+.research-paper-preparation p { margin-top:10px; color:#c0b9d0; font-size:11px; line-height:1.7; overflow-wrap:anywhere; }
+.research-paper-preparation p.research-paper-preparation-title { color:#ece6f9; font-size:12px; }
+.research-paper-preparation > small { display:block; margin-top:8px; color:#928ca5; font-size:10px; line-height:1.6; }
+.research-paper-preparation.preparation-failed,.research-paper-preparation.preparation-stopped { border-color:#494138; background:#211e1b; }
 .research-current-question { padding:14px 0 0; color:#eef0f7; font-size:14px; overflow-wrap:anywhere; }
 
 .research-search-results {

@@ -78,7 +78,7 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat", rese
   onIntentPreview?: (event: ResearchIntentPreview) => void;
   onResearchActivity?: (event: ResearchActivity) => void;
   onResearchTurnStart?: () => void;
-  researchContext?: { sourceIds: string[]; pastedText: string; pastedKind: "paper" | "code"; sessionId: string; previousRunId: string | null; searchEnabled: boolean };
+  researchContext?: { sourceIds: string[]; pastedText: string; pastedKind: "paper" | "code"; sessionId: string; previousRunId: string | null; searchEnabled: boolean; paper2agentEnabled: boolean; paperIds?: string[] };
 }) {
   const baseSettings = SESSION_VARIANTS[variant];
   const settings = research ? { ...baseSettings,
@@ -88,7 +88,7 @@ export default function PipecatSession({ onBusyChange, variant = "pipecat", rese
   } : baseSettings;
   const researchCallbacks = useRef({ onResearchRun, onVoiceState, onTranscript, onIntentPreview, onResearchActivity, onResearchTurnStart });
   researchCallbacks.current = { onResearchRun, onVoiceState, onTranscript, onIntentPreview, onResearchActivity, onResearchTurnStart };
-  const contextBody = JSON.stringify(researchContext || { sourceIds: [], pastedText: "", pastedKind: "paper", searchEnabled: true, previousRunId: null });
+  const contextBody = JSON.stringify(researchContext || { sourceIds: [], pastedText: "", pastedKind: "paper", searchEnabled: true, paper2agentEnabled: false, previousRunId: null });
   const contextRef = useRef(contextBody);
   contextRef.current = contextBody;
   const mounted = useRef(true);

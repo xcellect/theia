@@ -44,6 +44,7 @@ function endpointFor(path) {
   if (route === 'health' || route === 'voice/health') return { route, kind: 'health', methods: ['GET'] };
   if (route === 'voice/offer') return { route, kind: 'offer', methods: ['POST', 'PATCH'] };
   if (route === 'context') return { route, kind: 'context', methods: ['POST'] };
+  if (route === 'sessions' || (parts[0] === 'sessions' && parts.length === 2)) return { route, kind: 'workspace', methods: ['GET'] };
   if (route === 'runs') return { route, kind: 'run', methods: ['POST'] };
   if (parts[0] === 'runs' && parts.length === 3 && parts[2] === 'events') return { route, kind: 'events', methods: ['GET'] };
   if (parts[0] === 'runs' && parts.length === 3 && parts[2] === 'cancel') return { route, kind: 'run', methods: ['POST'] };
@@ -84,6 +85,9 @@ function safeHealth(data) {
   if (data.search && typeof data.search.configured === 'boolean') {
     result.search = { configured: data.search.configured, provider: 'Exa' };
   }
+  if (data.paper2agent && typeof data.paper2agent.available === 'boolean' && data.paper2agent.mode === 'draft' && data.paper2agent.supported === 'arxiv') {
+    result.paper2agent = { available: data.paper2agent.available, mode: 'draft', supported: 'arxiv' };
+  }
   if (Array.isArray(data.sources)) result.sources = data.sources.slice(0, 30).map(source => {
     if (!source || typeof source !== 'object') throw new Error('Invalid source metadata');
     return Object.fromEntries(['id', 'title', 'kind', 'description'].filter(key => typeof source[key] === 'string').map(key => [key, source[key]]));
@@ -109,7 +113,38 @@ function safeSource(data) {
   return result;
 }
 
+function fields(data, keys) {
+  return Object.fromEntries(keys.filter(key => data && ['string', 'number', 'boolean'].includes(typeof data[key])).map(key => [key, data[key]]));
+}
+
+function safeWorkspace(data) {
+  const run = item => fields(item, ['runId', 'question', 'status', 'createdAt', 'updatedAt']);
+  if (Array.isArray(data.sessions)) return { sessions: data.sessions.slice(0, 50).map(item => fields(item,
+    ['sessionId', 'title', 'paperCount', 'latestRunId', 'status', 'createdAt', 'updatedAt'])) };
+  if (typeof data.sessionId !== 'string' || !idPattern.test(data.sessionId) || !Array.isArray(data.papers) || !Array.isArray(data.runs)) throw new Error('Invalid workspace');
+  return {
+    sessionId: data.sessionId,
+    summary: typeof data.summary === 'string' ? data.summary.slice(0, 3000) : '',
+    runs: data.runs.slice(-100).map(run),
+    messages: Array.isArray(data.messages) ? data.messages.slice(-20).map(item => fields(item, ['messageId', 'role', 'content', 'runId'])) : [],
+    papers: data.papers.slice(-50).map(paper => ({
+      ...fields(paper, ['paperId', 'sourceId', 'title', 'url', 'coverage', 'status', 'version']),
+      reports: Array.isArray(paper.reports) ? paper.reports.slice(-50).map(run) : [],
+      jobs: Array.isArray(paper.jobs) ? paper.jobs.slice(-5).map(job => ({
+        ...fields(job, ['jobId', 'paperId', 'runId', 'kind', 'state', 'reason', 'executed']),
+        repository: fields(job.repository, ['status', 'url', 'commit', 'checkoutScope']),
+        capabilities: {
+          ...fields(job.capabilities, ['measuredAt', 'architecture', 'cpuCount', 'ramAvailableBytes', 'diskFreeBytes', 'cudaAvailable', 'mpsAvailable', 'isolatedExecutor']),
+          gpu: Array.isArray(job.capabilities?.gpu) ? job.capabilities.gpu.map(gpu => fields(gpu, ['name', 'vramFreeBytes', 'vramTotalBytes'])) : [],
+        },
+        requirements: fields(job.requirements, ['runtime', 'cudaRequired', 'ramBytes', 'diskBytes', 'vramBytes', 'requirementsComplete']),
+      })) : [],
+    })),
+  };
+}
+
 function safeResponse(data, kind, method) {
+  if (kind === 'workspace') return safeWorkspace(data);
   if (kind === 'health') return safeHealth(data);
   if (kind === 'source') return safeSource(data);
   if (kind === 'context') {
@@ -196,7 +231,7 @@ export async function proxyResearch(request, path, { fetchImpl = fetch } = {}) {
     const response = await fetchImpl(`${backend}/${endpoint.route}`, {
       method: request.method, headers, ...(body ? { body } : {}), cache: 'no-store', redirect: 'error',
       signal: AbortSignal.any([request.signal, disconnected.signal,
-        AbortSignal.timeout(endpoint.kind === 'events' ? 130000 : endpoint.kind === 'health' ? 5000 : 25000)]),
+        AbortSignal.timeout(endpoint.kind === 'events' ? 390000 : endpoint.kind === 'health' ? 5000 : 25000)]),
     });
     if (response.ok && endpoint.kind === 'events') {
       if (!response.body || !response.headers.get('content-type')?.startsWith('text/event-stream')) throw new Error('Invalid event stream');

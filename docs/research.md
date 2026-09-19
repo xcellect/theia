@@ -1,23 +1,24 @@
 # Research Orb
 
-Open **http://127.0.0.1:3000/** (or `/research`) to ask a research question by text or voice, inspect Jev's routing decision, watch paper discovery and two specialists, and export a cited Markdown report. Jev chooses whether to search with Exa, read supplied evidence, or request clarification. General Compute runs the Evidence Analyst, Critical Reader, and report writer; Gradium provides speech recognition and synthesis. Prepared Paper2Agent material remains an optional source example.
+Open **http://127.0.0.1:3000/** (or `/research`) to ask a research question, watch Jev route it, converse with individual papers and compare their cited findings. The app uses the starter **Next.js + Pipecat + Gradium + General Compute** stack, with **Exa** discovery and actual **Paper2Agent Paper2Skill** PDF preparation. Each conversation has a persistent workspace. Paper agents are separate, evidence-scoped General Compute calls, not impersonations of paper authors.
 
 ## Start locally
 
-From `voice-ai-hackathon/practice/`, preserve existing settings in `.env.local` and add the research variables from `.env.example`:
+From `voice-ai-hackathon/practice/`, preserve existing settings in `.env.local` and configure:
 
 | Setting | Purpose |
 | --- | --- |
-| `TYPESAFE_API_KEY` | Required for live Jev routing. |
-| `TYPESAFE_MODEL=jev-latest` | Jev model; defaults to `jev-latest`. |
-| `EXA_API_KEY` | Required for publication search and extraction of public paper URLs. Optional when using only prepared or pasted sources. |
-| `GENERALCOMPUTE_API_KEY` and `GENERALCOMPUTE_MODEL` | Required for the specialists and report. Use an exact available model ID. |
+| `TYPESAFE_API_KEY` | Required for Jev routing, paper selection, repository association and report screening. |
+| `TYPESAFE_MODEL=jev-latest` | Optional; defaults to `jev-latest`. |
+| `EXA_API_KEY` | Publication discovery, public URL extraction and repository search. Saved-paper conversations can reuse existing evidence. |
+| `GENERALCOMPUTE_API_KEY` and `GENERALCOMPUTE_MODEL` | Required for paper readers and report generation; use an available model ID. |
 | `GENERALCOMPUTE_BASE_URL` | Optional; defaults to `https://api.generalcompute.com/v1`. |
-| `GRADIUM_API_KEY` and `GRADIUM_VOICE_ID` | Required for voice. Typed research does not require Gradium. |
+| `GRADIUM_API_KEY` and `GRADIUM_VOICE_ID` | Voice recognition and synthesis. Typed research works without voice. |
 | `GRADIUM_REGION=auto` | Optional voice region. |
-| `PAPER2AGENT_ROOT` | Optional absolute path to the prepared example checkout. Blank uses sibling `Paper2Agent/`; external search does not depend on this pack. |
+| `PAPER2AGENT_ROOT` | Optional path to the Paper2Agent checkout; blank uses sibling `Paper2Agent/`. |
+| `RESEARCH_WORKSPACE_ROOT` | Optional storage directory; defaults to `pipecat-readiness/.data/research/`. This is a path, not an API key. |
 
-Keys stay in the server environment. Existing process variables take precedence over `.env.local`, then `.env`. Restart the Python server after changing settings.
+Keys stay on the server. Existing process variables take precedence over `.env.local`, then `.env`. Restart Python after changing configuration or backend code.
 
 ```sh
 # Once, if dependencies have not been installed:
@@ -31,88 +32,146 @@ npm run dev
 npm run dev:pipecat
 ```
 
-If these processes are already running, reuse the frontend and restart the Python process to load the research routes. Use the browser's **Start voice** control to request microphone access. End the existing voice session before starting another. The local proxy accepts `localhost`, `127.0.0.1`, and loopback IPv6 hosts; this setup is for local testing.
+Reuse running processes when appropriate. End an active voice session before restarting Python. The browser's **Start voice** button requests microphone access. This is a local, single-user application; session IDs are not authentication.
 
-## Test the workflow
+## Try the demo
 
-1. Start with **New research**, keep **Search for papers** enabled, and ask: “Find recent papers on evaluating research agents.” No Paper2Agent source selection is required.
-2. Watch Jev's acquisition decision, the actual Exa query/results, extraction status, and each specialist's streamed findings. Discovered results and **Sources examined** are distinct; the latter contains only text actually passed to the analysts.
-3. Read the report, inspect a few substantive claims against their citations, then copy or download the Markdown.
-4. Ask a follow-up within the same tab/session. Its previous question/report provides context while the server remains running; an earlier generated answer is never treated as source evidence.
-5. Try a public paper URL, or paste a short code sample/paper excerpt. URLs selected for acquisition are sent to Exa's contents API. Pasted code is read, never executed. To use the bundled example, select Paper2Agent manuscript/implementation and ask what it verifies.
-6. Cancel an active run, then submit a replacement. Cancelled findings and speech must not replace the new result.
-7. Start voice and repeat the question. The transcript and **Live intent · provisional** panel update while you speak. When the turn ends, the final Jev decision selects the analysis; verify one run starts and listen for the short final summary.
-8. Refresh during a run or after its report completes. The page reconnects only to its saved session/run and replays activity without another model call. Open a fresh tab or click **New research** for an empty workspace. While voice is connected, health recovery is restricted to the matching session.
+1. Click **New research**. Keep **Search for papers** and **Prepare full paper** enabled; full-paper preparation is enabled by default in the UI.
+2. Ask: **“Read Attention Is All You Need https://arxiv.org/abs/1706.03762 and BERT https://arxiv.org/abs/1810.04805. Explain each paper's method.”** General research questions also work; explicit URLs make this rehearsal reproducible.
+3. Watch Jev's actual selection, PDF preparation, separate paper-agent streams and the report. **Sources examined** contains only evidence actually read. Open citations to inspect the exact excerpts.
+4. Select the **Attention Is All You Need** paper card and ask: **“Explain this paper's attention mechanism and its limitations.”**
+5. Clear that selection, select **BERT**, and ask: **“Explain this paper's training objectives and evaluation limitations.”** Saved evidence is reused; follow-up questions do not require another Exa paper search.
+6. Select both cards and ask: **“Compare their methods, training objectives and limitations.”** Each reader analyzes its own paper; a coordinator compares both sets of evidence.
+7. Expand a paper's repository/compute status to see association, pinned commit when a clone succeeded, measured resources and the reason experiments cannot run. Code discovery does not prevent paper discussion.
+8. Refresh to restore this tab's workspace. After a backend restart, saved papers, reports and citation excerpts remain available. Use **Resume a saved conversation** to explicitly open another conversation. **New research** creates an empty session.
+9. Start voice and repeat a follow-up. Provisional Jev intent updates accompany the transcript; a committed turn starts the actual run and ends with a short spoken outcome. Physical microphone/headset acceptance remains separate from typed testing.
 
-Exa publication search requests five results together with extracted text. URL acquisition uses Exa's fixed API endpoint; the local backend does not directly fetch user URLs. Credentials, IP literals, local hostnames, and non-HTTP(S) URLs are rejected. Provider responses and execution time are bounded. Only actual extracted text is registered: metadata, generated summaries, empty content, and unreadable extraction do not become evidence. Each excerpt is capped at 3,200 characters, with 16,000 characters total. Citations open the exact registered excerpt and original URL. Coverage labels identify recognizable abstract-only content and otherwise state that complete-paper coverage is unverified. Exa's combined search/extraction response arrives as one batch; discoveries appear when it returns, then the analysts and writer stream normally.
+Cancelled or failed work retains an explicit status. Replaying a saved report does not start another provider call. Clear a paper selection when changing targets; select both cards when requesting an explicit comparison.
 
-The app does not upload/fully convert PDFs, import repositories at a pinned revision, execute code, or reproduce experiments. A publisher URL is not a guarantee that its complete paper can be read. Repository pages extracted by Exa are not a verified code checkout. The analysts use prepared Paper2Agent reading instructions only on that local-source branch; they do not run Paper2Skill/Paper2MCP, build new MCP tools, or independently reproduce paper experiments.
+## Architecture
 
-Tab session/run IDs are stored in `sessionStorage`, not durable account history. **New research** resets displayed results, selected/pasted sources, and previous-run context; it is disabled during an active run. The backend is still a local, single-user service with one active research run and shared voice infrastructure. Session IDs guard UI recovery and follow-up context; they are not authentication or multi-user authorization.
+```mermaid
+flowchart LR
+    U[Voice or text] --> UI[Next.js orb and live workspace]
+    UI <-->|WebRTC| V[Pipecat and Gradium STT/TTS]
+    UI --> R[Python research runner]
+    V --> R
+    R <--> W[SQLite and per-session files]
+    R --> J[Jev: intent, action and paper targets]
+    J --> E[Exa: papers, links and code candidates]
+    E --> S[Jev: relevant paper selection]
+    S --> P[Paper2Skill draft PDF packages]
+    P --> A[General Compute: reader per paper]
+    A --> C[Report writer and Jev evidence screen]
+    C --> UI
+    C --> V
+    E --> G[Jev repository association]
+    G --> K[Pinned README and manifest checkout]
+    K --> X[Measured compute and environment gate]
+    X --> W
+    R -->|SSE progress and findings| UI
+```
 
-Live intent previews call Jev on the accumulating transcript, with at most one preview request in flight and at least 0.5 seconds between starts. Preview values may change as more words arrive; they never start the specialists. A committed turn cancels its preview and obtains the final routing decision. A failed preview does not prevent the completed question from being processed. The final decision separates request type from evidence acquisition: `search`, `provided`, or `clarify`. Missing evidence can trigger search rather than rejecting a question for being outside Paper2Agent. Clarifications and research failures appear in the UI and are spoken when voice is connected.
+Jev returns typed decisions; Python dispatches and cancels work. The conversation actions are `answer_paper`, `compare_papers`, `discover_papers`, `discover_code` and `consider_experiment`, with server-validated paper IDs. The earlier prepared-source Evidence Analyst/Critical Reader path remains available for bundled or pasted material.
 
-## Verification
+Voice previews evaluate the accumulating transcript without launching research. At most one preview request is in flight, with at least 0.5 seconds between starts. The final committed turn receives its own routing decision. The same research context, including selected papers, is used for text and voice.
 
-**Exa integration checkpoint — September 19, 2026:** a real Exa adapter probe returned five papers and 16,000 characters of extracted evidence. The real browser then received the synthetic spoken question “Find papers about evaluating retrieval augmented generation.” Jev selected search; Exa produced five discoveries and five registered excerpts; both agents completed, with 28 finding deltas and 17 report deltas. The final report contained 6,198 characters and was not marked partial. The citation drawer exposed a 3,200-character source excerpt; download and refresh recovery passed.
+## Exa and Paper2Agent PDF preparation
 
-That browser check also confirmed an empty fresh browser, a new session after **New research**, an empty workspace after its reload, no overflow at 390 px, and no browser errors. The microphone input was synthetic; physical capture, audible quality, and headset latency still require user testing. **All 100 Python tests, 70 JavaScript tests, the production build with TypeScript, and HTTP checks pass.** The new backend coverage includes eight adapter tests, seven acquisition/runner tests, two additional bridge tests, and three follow-up-query tests. The browser-bundle secret scan passed across 125 files against eight configured credentials. The backend has been restarted with the follow-up-query fix. Provider key values are not recorded here.
+Exa supplies publication results, extracted text and bounded link lists. Discovery preserves URL candidates even when Exa returns no readable text. The resolver checks top-level URLs, nested links and URLs in source text, canonicalizes arXiv identities and retains link provenance. A bibliography link is not automatically treated as the parent paper. Jev selects up to two relevant papers; a bounded arXiv-focused fallback search is available when no supported candidate is selected.
 
-**Earlier prepared-source checkpoint, before Exa/session changes:** live typed research passed through the backend and browser. The initial run routed in 0.44 seconds and completed two agents plus a report in 6.94 seconds (one observation, before the final evidence screen was added). The following historical measurements establish the previous voice/report path, not acceptance of the newly added search path.
+Each selected arXiv paper passes independently through the actual sibling `paper_bundle.py` commands:
 
-That browser test clicked the actual **Start voice** control and used a synthetic microphone with real providers. It observed the transcript and four intent snapshots before the run, 20 specialist deltas, 10 report deltas, both agent panels, and eight source excerpts. Report download and refresh recovery passed with no browser errors. Screenshots at 1440 px and 390 px were visually inspected and had no horizontal overflow. Clipboard output was exactly the same 4,975-character Markdown as the download; the rendered report was unchanged after refresh. With reduced motion enabled, measured animation durations were zero and the orb retained its visible “Ready when you are” label.
+```text
+prepare → extract → review-aid → build --draft → verify
+```
 
-A separate live synthetic voice check recognized the known input, received four intent-preview updates with a ready Jev preview before the run, completed both specialists, and produced a 4,705-character report. After report readiness, a 285-character summary produced five non-silent 48 kHz audio frames; cleanup passed. These checks exercise real providers and the browser/pipeline with synthetic input. They do **not** verify a person's physical microphone, speakers, perceived speech quality, or headset latency. At this checkpoint, **70 JavaScript tests, 80 Python tests, the production build including TypeScript checks, and HTTP verification pass**. The secret scan also passed across 123 files against seven configured values; those values are not recorded here.
+Conversion is sequential; the first paper's analysis can stream while the second prepares. Supported arXiv abstract/PDF/HTML URLs resolve to the PDF host. Each PDF is bounded to 20 MB and 60 pages. Timeouts, cancellation and mechanical checks run around real subprocesses. A candidate without Exa text becomes evidence only after preparation produces actual text. If preparation fails, usable Exa excerpts can still be analyzed with honest coverage; empty metadata is not evidence.
 
-Reports now receive a second Jev check against the actual excerpts. Draft passages with uncertain support are withheld, and the report is labeled partial; this is a model-based screen, not a guarantee of scientific correctness. Check important claims against the citation drawer. Live streamed text is labeled draft until that check finishes.
+The app caches immutable PDF packages, originals and manifests in `pipecat-readiness/.cache/paper2agent/`, outside Git. Follow-ups retrieve question-ranked passages from saved packages. Each paper gets up to 8,000 characters of evidence, with at most two papers analyzed per turn. Session-specific questions and retrieval records live under the conversation workspace, not the shared cache.
 
-After the latest source audit, the prompts were tightened to distinguish reproduction checks from scientific correctness, metadata validation from test execution, and absent excerpt evidence from global claims about the framework. The subsequent live run completed both agents and a 5,980-character report; the screen withheld one of seven passages. The UI correctly labels it partial. The strict `smoke:research` command returned failure because it requires a fully supported, non-partial report, not because the report or streaming pipeline failed.
+**Draft is not reviewed.** The [upstream skill](../../Paper2Agent/skills/paper2agent/paper2skill/SKILL.md) requires “Inspect every page and every supplied image.” The worker leaves review flags unresolved and reports unreviewed coverage. Full acceptance still requires source/page inspection, specific review notes, a fresh verifier, `build --require-reviewed` and `verify --strict`. The report uses selected passages, not every figure or table. Missing selected passages do not prove a method is absent from the complete paper.
 
-The latest three-claim manual audit matched the relevant manuscript and workflow-verifier excerpts, but categorical statements about new-dataset verification and scientific correctness still overstated what those excerpts establish. Grounding acceptance remains **partial** while prompts are tightened and the revised report is rechecked.
+## Workspace, memory and citations
+
+SQLite in `pipecat-readiness/.data/research/state.sqlite` stores sessions, raw committed messages, papers, runs, events, findings and job state. WAL transactions serialize writes; inspectable artifacts use atomic file replacement. The whole `.data/` directory is excluded from Git.
+
+```text
+.data/research/
+  state.sqlite
+  sessions/<session-id>/
+    summary.md
+    runs/<run-id>/report.md
+    papers/<paper-id>/
+      paper.json
+      reports/<run-id>.md
+      retrieval/
+      jobs/<job-id>/
+        job.json
+        repo/<repository-name>/
+```
+
+The store retains raw history and builds bounded context: up to six recent messages within 6,000 characters, an extractive summary within 3,000 and finding notes within 2,000. Jev receives bounded conversation context for routing. Paper readers and the comparison writer receive recent user questions plus current source evidence; previous generated answers are not fed back as independent evidence. Each paper reader can cite only its own current source. Findings retain draft/verification status and passage identifiers.
+
+Paper identities survive turns. Citation IDs derive from paper identity, version and the exact excerpt; generated passage records also retain chunk IDs. Persisted run snapshots preserve the original cited text even when a later question retrieves different passages. In-memory pruning therefore does not erase saved reports or their citations.
+
+On startup, unfinished runs/jobs become **interrupted**, preserving completed work and partial output without automatically resuming paid operations. Request IDs and event sequence numbers are deduplicated. The tab stores its current session/run in `sessionStorage`; durable history is held by SQLite, not by the tab. New sessions do not automatically load the backend's latest report.
+
+## Repositories and experiment eligibility
+
+The runner looks for public GitHub links in paper evidence and uses a bounded ordinary Exa code search when needed. Jev evaluates association with the exact paper. Results remain labeled `author-linked`, `third-party`, `uncertain` or `not-found`; a search hit alone does not establish authorship. Existing discovery outcomes are reused for ordinary follow-ups.
+
+Associated repositories undergo a bounded shallow clone, pinned to a commit, with README and environment manifests checked out for inspection. Checkout artifacts and job status belong to the session/paper workspace. The application uses argument-list Git subprocesses and does not install dependencies or run repository scripts.
+
+The gate measures the actual local host: CPU/platform, available RAM, free disk, runtimes and available GPU/CUDA information. It compares explicit documented requirements while recording unknown operation-specific requirements. General Compute inference credentials do not provide an experiment machine.
+
+**No isolated experiment worker is registered in this demo, so experiments do not execute.** The UI records `blocked_compute`, `blocked_environment`, `requirements_unknown` or `unsupported_operation` and the specific reason. Repository inspection is not scientific reproduction. Paper2MCP's complete code-generation, execution and independent verification workflow remains unconnected. Next work is a registered isolated executor plus a bounded, verified operation with validated dependencies, inputs and resource limits; a full arbitrary-repository runner is outside this demo.
+
+## Verification and limits
+
+**Current workspace checkpoint — September 19, 2026:** a real two-paper browser journey completed its initial research in **19.563 seconds**, individual follow-ups in **6.455 / 5.904 seconds**, and a comparison in **8.677 seconds**. A backend restart preserved two papers and four runs, including report/event replay. Explicit resume, selecting BERT without another Exa search, and the mobile view passed without browser errors. These are individual observations, not latency guarantees.
+
+A later comparison after the paper-context fix produced **4,891 characters**, with **three of eight passages withheld** by Jev's evidence screen. It remained visibly partial and unreviewed. The screen can remove unsupported text but does not establish scientific correctness or full-paper review.
+
+Final validation passed **163 Python tests, 72 JavaScript tests, TypeScript, production build and HTTP readiness checks**. The browser/source secret scan checked 192 files against eight configured values without printing credentials. See [todo.md](../../todo.md) for observed browser/voice results and remaining acceptance. Storage tests cover restart/isolation, ten-turn bounded memory, immutable citation revisions, duplicate requests/events and interrupted jobs.
+
+Earlier checkpoints separately exercised real 15-page Paper2Skill conversion, cache reuse, Exa voice discovery and synthetic speech through Gradium. The new workspace acceptance above used typed browser input. Physical microphone/headset quality and latency still need user testing; neither synthetic speech nor typed tests establish that acceptance.
 
 ```sh
-# Configuration and local route readiness; these do not prove live research:
-npm run check:config -- gradium
-curl http://127.0.0.1:3000/api/research/health
-curl http://127.0.0.1:3000/api/research/voice/health
-
-# Live General Compute / Gradium provider probe:
-npm run smoke:gradium
-
-# One live Jev + two-specialist + report run, with summary-only output:
-npm run smoke:research
-# Optional alternate local frontend port:
-node scripts/research-smoke.mjs --base-url http://127.0.0.1:3001
-
-# One integrated synthetic speech research turn (no microphone/headset):
-npm run smoke:research:voice
-
-# Automated checks:
 npm test
 npm run typecheck
 npm run test:pipecat
 npm run build
+
+# Readiness only:
+curl http://127.0.0.1:3000/api/research/health
+curl http://127.0.0.1:3000/api/research/voice/health
+
+# Optional real-provider checks:
+npm run smoke:gradium
+npm run smoke:research
+npm run smoke:research:voice
 ```
 
-A successful real research run verifies Jev routing and model generation. A browser microphone/headset session is required to verify capture, transcription, acknowledgment, and final speech. Record those outcomes separately from automated checks in the [MVP acceptance criteria](../../markdown.md).
+If the app reports an unavailable backend, start or restart `npm run dev:pipecat`. Missing configuration appears by variable name; provider failures preserve the question. Session/PDF runs have a bounded 360-second overall deadline; individual preparation, provider and repository stages have shorter limits. Cancellation stops child work and marks retained output partial.
 
-If the app reports an unavailable backend, start or restart `npm run dev:pipecat`. Missing settings are listed by variable name. Provider errors retain the question so it can be retried. Runs have a 90-second deadline; retained incomplete output is labeled partial. History and source excerpts are held in memory, capped at five runs and about 15 minutes, and disappear on restart.
+Remaining limits include strict visual/source review, general publisher PDFs/uploads, arbitrary scientific execution, authenticated multi-user access and a durable independent job queue. Repository discovery may fail or stay uncertain for papers without verifiable code.
 
 ## Integration points
 
-The browser uses same-origin `/api/research/...` endpoints. Next.js forwards them only to the local Python process, strips browser credentials, and streams events without buffering. Python owns routing, retrieval, model calls, cancellation, and the event log.
+Next.js forwards same-origin research routes to the local Python process and streams SSE without buffering. Python owns providers, durable storage, retrieval, job gating and cancellation.
 
 | Browser endpoint | Behavior |
 | --- | --- |
-| `GET /api/research/health` | Research/search readiness, source packs, provider names, and active/latest run/session identifiers. |
-| `POST /api/research/context` | Save `{sourceIds, pastedText?, pastedKind?, searchEnabled?, sessionId?, previousRunId?}` for the next voice turn; returns `{status:"ok"}` without provider calls. |
-| `POST /api/research/runs` | Start with `{clientRequestId, question, sourceIds, pastedText?, pastedKind?, previousRunId?, searchEnabled?, sessionId?}`; returns `202 {runId}`. |
-| `GET /api/research/runs/:runId/events` | Replay/live SSE; honors `Last-Event-ID`. |
+| `GET /api/research/health` | Provider/search/Paper2Agent readiness and current run/session identifiers. |
+| `GET /api/research/sessions` | Saved conversation summaries for explicit resume. |
+| `GET /api/research/sessions/:sessionId` | This conversation's papers, runs, recent messages and job outcomes. |
+| `POST /api/research/context` | Save selected sources/papers and session context for the next voice turn. |
+| `POST /api/research/runs` | Start a question with `clientRequestId`, `sessionId`, `paperIds`, `sourceIds`, search/preparation flags and optional pasted text. |
+| `GET /api/research/runs/:runId/events` | Persisted replay and live SSE; honors `Last-Event-ID`. |
 | `POST /api/research/runs/:runId/cancel` | Cancel with a JSON `{}` body. |
-| `GET /api/research/runs/:runId/sources/:sourceId` | An excerpt actually read by that run. |
+| `GET /api/research/runs/:runId/sources/:sourceId` | The exact excerpt read in the cited run, including after restart. |
 | `GET /api/research/voice/health` | Combined research and Gradium readiness. |
-| `POST/PATCH /api/research/voice/offer` | Small WebRTC signaling for research voice. |
+| `POST/PATCH /api/research/voice/offer` | Small WebRTC signaling. |
 
-The two optional prepared source IDs are `paper2agent-paper` and `paper2agent-code`. External search normally submits `sourceIds: []` and `searchEnabled: true`. Citation IDs such as `S1` are scoped to a run. Reconnecting an event stream replays the existing run; it does not start another model call. The UI stores its own `sessionId`/`runId` in `sessionStorage` and checks matching session identifiers during voice recovery; it no longer loads the global latest run on a fresh visit.
-
-Before a committed run, the voice data channel sends `research.intent` messages with `phase: pending | ready | error`, `turnId`, `transcript`, and `speculative: true`; ready messages include the actual Jev answers, model, and profile. These provisional messages are separate from the run's buffered SSE events. `research.started` announces the committed run/session. SSE carries routing/acquisition, `search.started/result/completed`, `source.fetch.started/completed`, source-read events, specialist deltas/completions, draft report deltas, evidence-check status, and the final report. Draft text may be revised or withheld by the final evidence screen.
+Live events include routing, discovery, `paper.selected`, `paper2agent.*`, `paper.agent.*`, `memory.retrieved`, `repo.discovered/cloned`, `compute.checked`, `experiment.blocked`, report screening and terminal run status. Events carry run/session identity and paper/job identity where applicable. Voice provisional intent arrives separately through RTVI `research.intent`; `research.started` announces the committed run. All progress represents actual work boundaries; streamed report drafts may be revised or withheld by the final evidence screen.

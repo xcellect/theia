@@ -59,6 +59,7 @@ test('health preserves source and provider readiness without configuration secre
   const data = {
     status: 'ok', configured: false, missing: ['TYPESAFE_API_KEY', 'EXA_API_KEY', 'private'], configError: 'private', activeRunId: null, latestRunId: 'run-1',
     activeSessionId: null, latestSessionId: 'tab-1', search: { configured: true, provider: 'Exa', apiKey: 'private' },
+    paper2agent: { available: true, mode: 'draft', supported: 'arxiv', root: '/private/repo', config: 'private' },
     sources: [{ id: 'paper2agent-paper', title: 'Paper2Agent', kind: 'paper', description: 'Bundled manuscript', private: 'private' }],
     providers: { routing: 'Jev', analysis: 'General Compute', model: 'configured-model', apiKey: 'private' },
     internalConfig: { apiKey: 'private' },
@@ -74,6 +75,7 @@ test('health preserves source and provider readiness without configuration secre
   assert.equal(result.activeSessionId, null);
   assert.equal(result.latestSessionId, 'tab-1');
   assert.deepEqual(result.search, { configured: true, provider: 'Exa' });
+  assert.deepEqual(result.paper2agent, { available: true, mode: 'draft', supported: 'arxiv' });
   assert.doesNotMatch(JSON.stringify(result), /private/);
 });
 
@@ -85,6 +87,22 @@ test('health permits nullable latest run recovery IDs but strips invalid values'
     const data = await response.json();
     if (latestRunId === null) assert.equal(data.latestRunId, null);
     else assert.equal(Object.hasOwn(data, 'latestRunId'), false);
+  }
+});
+
+test('health only exposes supported Paper2Agent draft preparation metadata', async () => {
+  for (const paper2agent of [
+    { available: false, mode: 'draft', supported: 'arxiv' },
+    { available: true, mode: 'verified', supported: 'arxiv' },
+    { available: true, mode: 'draft', supported: 'arbitrary' },
+    { available: 'private', mode: 'draft', supported: 'arxiv' },
+  ]) {
+    const response = await proxyResearch(request('health'), 'health', {
+      fetchImpl: async () => Response.json({ configured: true, missing: [], paper2agent }),
+    });
+    const data = await response.json();
+    if (paper2agent.available === false) assert.deepEqual(data.paper2agent, paper2agent);
+    else assert.equal(Object.hasOwn(data, 'paper2agent'), false);
   }
 });
 
@@ -179,7 +197,7 @@ test('voice health and signaling use research-specific backend routes', async ()
 });
 
 test('voice context forwards bounded same-origin JSON to a fixed endpoint and sanitizes acknowledgment', async () => {
-  const payload = { sourceIds: ['paper2agent-code'], pastedText: 'function example() {}', pastedKind: 'code' };
+  const payload = { sourceIds: ['paper2agent-code'], pastedText: 'function example() {}', pastedKind: 'code', paper2agentEnabled: true };
   const response = await proxyResearch(request('context', { method: 'POST', body: JSON.stringify(payload) }), ['context'], {
     fetchImpl: async (url, options) => {
       assert.equal(url, 'http://127.0.0.1:7860/research/context');
@@ -216,4 +234,16 @@ test('unknown failures, malformed responses and offline backend cannot leak raw 
     code: 'MISSING_CONFIG', message: 'private', missing: ['TYPESAFE_API_KEY', 'private'],
   } }, { status: 503 }) });
   assert.equal((await missing.json()).error.message, 'Missing variables: TYPESAFE_API_KEY');
+});
+
+test('persistent workspace routes expose only public session and job fields', async () => {
+  const payload = { sessionId: 'session-1', secret: 'internal-secret', papers: [{ paperId: 'paper-a', title: 'Paper', path: '/private/work', reports: [{ runId: 'run-1', status: 'draft' }], jobs: [{ state: 'blocked_compute', reason: 'Insufficient RAM', privateLog: '/private/log', repository: { url: 'https://github.com/owner/repo', commit: 'a'.repeat(40), credentials: 'secret' }, capabilities: { ramAvailableBytes: 1234, secret: 'secret', gpu: [] } }] }], runs: [{ runId: 'run-1', question: 'Explain it', status: 'completed' }], messages: [] };
+  const response = await proxyResearch(request('sessions/session-1'), 'sessions/session-1', { fetchImpl: async url => { assert.equal(url, 'http://127.0.0.1:7860/research/sessions/session-1'); return Response.json(payload); } });
+  const data = await response.json();
+  assert.equal(data.papers[0].jobs[0].state, 'blocked_compute');
+  assert.equal(data.papers[0].jobs[0].capabilities.ramAvailableBytes, 1234);
+  assert.ok(!JSON.stringify(data).includes('secret'));
+  assert.ok(!JSON.stringify(data).includes('/private'));
+  const listed = await proxyResearch(request('sessions'), 'sessions', { fetchImpl: async () => Response.json({ sessions: [{ sessionId: 'session-1', title: 'Paper', latestRunId: 'run-1', paperCount: 1, databasePath: '/private/state.sqlite' }] }) });
+  assert.deepEqual((await listed.json()).sessions, [{ sessionId: 'session-1', title: 'Paper', latestRunId: 'run-1', paperCount: 1 }]);
 });
