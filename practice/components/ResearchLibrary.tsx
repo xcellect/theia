@@ -22,6 +22,7 @@ type Props = {
   onOpenRun: (runId: string) => void;
   onDeleteSession?: (sessionId: string) => void;
   refreshToken?: number;
+  maxPapers?: number;
 };
 
 const LABELS: Record<string, string> = {
@@ -68,7 +69,7 @@ function JobDetails({ job }: { job: PaperJob }) {
   </details>;
 }
 
-export default function ResearchLibrary({ sessionId, busy, selectedPaperIds, onSelect, onResume, onOpenRun, onDeleteSession, refreshToken = 0 }: Props) {
+export default function ResearchLibrary({ sessionId, busy, selectedPaperIds, onSelect, onResume, onOpenRun, onDeleteSession, refreshToken = 0, maxPapers = 5 }: Props) {
   const [session, setSession] = useState<Session | null>(null);
   const [problem, setProblem] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -135,7 +136,7 @@ export default function ResearchLibrary({ sessionId, busy, selectedPaperIds, onS
   const conversations = history.filter(item => item.sessionId !== sessionId && item.latestRunId);
   const select = (paperId: string) => onSelect(selectedPaperIds.includes(paperId)
     ? selectedPaperIds.filter(id => id !== paperId)
-    : [...selectedPaperIds, paperId].slice(0, 2));
+    : [...selectedPaperIds, paperId].slice(0, maxPapers));
 
   const requestDelete = (id: string) => {
     setPendingDelete(id);
@@ -185,7 +186,7 @@ export default function ResearchLibrary({ sessionId, busy, selectedPaperIds, onS
     </header>
     {deleteConfirmation(sessionId)}
     <p className="library-hint">{papers.length
-      ? "Select a paper to ask a follow-up, or select two and ask to compare them."
+      ? `Ask about a paper by name, let Jev choose relevant papers, or select up to ${maxPapers} to compare.`
       : "Ask a research question to discover papers. Their evidence and reports stay in this conversation."}</p>
     {problem && <p className="library-problem" role="status">{problem}</p>}
     {papers.length > 0 && <div className="library-papers">
@@ -195,7 +196,7 @@ export default function ResearchLibrary({ sessionId, busy, selectedPaperIds, onS
         const original = safeUrl(paper.url);
         return <article className={`library-paper${selected ? " library-paper-selected" : ""}`} key={paper.paperId}>
           <label className="library-paper-title">
-            <input type="checkbox" checked={selected} disabled={controlsBusy || (!selected && selectedPaperIds.length >= 2)} onChange={() => select(paper.paperId)} />
+            <input type="checkbox" checked={selected} disabled={controlsBusy || (!selected && selectedPaperIds.length >= maxPapers)} onChange={() => select(paper.paperId)} />
             <span>{paper.title}</span>
           </label>
           <div className="library-paper-meta"><span>{label(paper.status)}</span>{original && <a href={original} target="_blank" rel="noopener noreferrer">Original paper ↗</a>}</div>

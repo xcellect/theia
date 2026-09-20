@@ -21,7 +21,8 @@ from openai import AsyncOpenAI
 
 from research_sources import SOURCE_REGISTRY, FILES, ROOT, prepared_available, reading_instructions, retrieve, unknown_reference
 from research_search import ExaSearchError, acquire_sources
-from research_paper2agent import Paper2AgentWorker
+from research_paper2agent import Paper2AgentWorker, arxiv_pdf_url
+from research_limits import MAX_READING_PAPERS
 from research_session import SessionResearchMixin
 from voice_config import ConfigurationError, read_base_url
 
@@ -83,12 +84,19 @@ def validate_routing(result):
                 or abs(sum(probabilities.values()) - 1) >= 0.025):
             raise ResearchError("Jev returned an invalid source acquisition decision. Retry your question.", code="ROUTING_INVALID", status=502)
         validated["acquisition"] = acquisition
-    for name in ("action", "target"):
+    for name in ("action", "target", "reading_scope"):
         if name in answers:
             answer = answers[name]
             if (not isinstance(answer, dict) or answer.get("type") != "choice"
                     or not isinstance(answer.get("choice"), str) or not bounded_number(answer.get("confidence"))):
                 raise ResearchError("Jev returned an invalid paper decision.", code="ROUTING_INVALID", status=502)
+            validated[name] = answer
+    if "reading_scope" in validated and validated["reading_scope"]["choice"] not in {"single", "multiple", "topic"}:
+        raise ResearchError("Jev returned an invalid reading scope.", code="ROUTING_INVALID", status=502)
+    for name, answer in answers.items():
+        if re.fullmatch(r"saved_paper_\d+", name):
+            if not isinstance(answer, dict) or answer.get("type") != "noul" or not bounded_number(answer.get("noul")):
+                raise ResearchError("Jev returned an invalid saved-paper relevance decision.", code="ROUTING_INVALID", status=502)
             validated[name] = answer
     return validated
 
@@ -114,6 +122,7 @@ class ResearchRun:
     session_id: str | None = None
     paper2agent_enabled: bool = False
     paper_ids: list = field(default_factory=list)
+    reading_scope: str | None = None
     persist: object = None
 
     def emit(self, event_type, **payload):
@@ -161,7 +170,7 @@ class ResearchRunner(SessionResearchMixin):
         return {"status": "ok", "configured": not missing and not error, "missing": missing,
                 "configError": error, "sources": SOURCE_REGISTRY if available else [],
                 "search": {"configured": bool(self.environment.get("EXA_API_KEY", "").strip()), "provider": "Exa"},
-                "paper2agent": {"available": self.paper2agent.available(), "mode": "draft", "supported": "arxiv"},
+                "paper2agent": {"available": self.paper2agent.available(), "mode": "draft", "supported": "arxiv", "maxPapers": MAX_READING_PAPERS},
                 "providers": {"routing": "Jev", "analysis": "General Compute",
                               "model": self.environment.get("GENERALCOMPUTE_MODEL", "").strip()},
                 "activeRunId": active.id if active else None, "latestRunId": latest.id if latest else None,
@@ -311,7 +320,7 @@ class ResearchRunner(SessionResearchMixin):
         state = {"workspace_papers": papers, "selected_paper_ids": run.paper_ids, "request": run.question, "available_sources": [s for s in SOURCE_REGISTRY if s["id"] in run.source_ids and prepared_available(self.source_root)],
                  "pasted_excerpt": run.pasted_text[:2000], "pasted_kind": run.pasted_kind,
                  "previous_turn": self._question_context(run), "conversation_memory": run.previous[:3000], "search_available": search_available,
-                 "paper_preparation": "Jev selects up to two relevant arXiv papers for draft PDF conversion; experiments require a compatible executor."
+                 "paper_preparation": f"Jev chooses a relevant set of up to {MAX_READING_PAPERS} arXiv papers for draft PDF conversion, or exactly one for a specific-paper request; experiments require a compatible executor."
                      if run.paper2agent_enabled else "Disabled",
                  "scope": "Exa can discover research publications and return extracted source text or retrieve a supplied public URL when search_available is true. Selected local excerpts and pasted text can be read directly. No code execution or scientific reproduction."}
         async with asyncio.timeout(8):
@@ -448,13 +457,15 @@ class ResearchRunner(SessionResearchMixin):
                         await self.voice.announce(run)
                 run.emit("routing.started", model=self.jev_model)
                 answers, model = await self._routing(run)
+                run.reading_scope = answers.get("reading_scope", {}).get("choice")
                 profile = "code" if answers["needs_code"]["noul"] >= 0.65 else "paper"
                 acquisition = self._acquisition(run, answers)
                 run.emit("routing.completed", answers=answers, model=model, profile=profile, acquisition=acquisition)
                 session_action, target_ids = self._resolve_paper_route(run, answers)
                 if session_action in {"answer_paper", "compare_papers", "discover_code", "consider_experiment"} and target_ids:
                     acquisition = "workspace"
-                run.emit("paper.routing", action=session_action, paperIds=target_ids, message="Jev selected the paper conversation action.")
+                run.emit("paper.routing", action=session_action, paperIds=target_ids, readingScope=run.reading_scope,
+                         message="Jev is focusing on one requested paper." if run.reading_scope == "single" else "Jev selected the paper conversation action and relevant reading scope.")
                 clarification = None
                 if acquisition == "clarify":
                     clarification = ("Tell me the research question or paper you want investigated. You can also paste a source excerpt."
@@ -479,7 +490,7 @@ class ResearchRunner(SessionResearchMixin):
                     sources, paper_findings, job_tasks = await self._session_acquire(run, acquisition, target_ids, session_action, profile, instructions)
                 elif acquisition == "search":
                     stage = "search"
-                    urls = list(dict.fromkeys(url.rstrip(".,);]") for url in re.findall(r"https?://[^\s<>]+", run.question)))[:3]
+                    urls = list(dict.fromkeys(url.rstrip(".,);]") for url in re.findall(r"https?://[^\s<>]+", run.question)))[:MAX_READING_PAPERS]
                     sources = await acquire_sources(search_query(run), self.environment["EXA_API_KEY"].strip(), run.emit,
                                                     urls=urls or None, http=self.http)
                 else:
@@ -490,7 +501,7 @@ class ResearchRunner(SessionResearchMixin):
                             instructions = reading_instructions(self.source_root)
                     sources = retrieve(run.question, local_ids, pasted_text=run.pasted_text,
                                        pasted_kind=run.pasted_kind, code_profile=profile == "code", root=self.source_root)
-                if run.paper2agent_enabled and paper_findings is None:
+                if run.paper2agent_enabled and paper_findings is None and any(arxiv_pdf_url(source.get("url")) for source in sources):
                     stage = "paper preparation"
                     sources = await self.paper2agent.prepare(sources, run.question, run.emit)
                     instructions += ("\nSources marked Paper2Agent draft were extracted through the actual Paper2Skill converter. "

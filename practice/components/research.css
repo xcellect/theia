@@ -1596,6 +1596,10 @@
 .conversation-problem { padding:12px 20px; color:#e6b388; font-size:12px; }
 .conversation-load { justify-self:center; }
 .research-workflow { scroll-margin-top:20px; }
+.research-paper-selection { margin:12px 18px; padding:12px 14px; border:1px solid #38334b; border-radius:8px; background:#211c2d; overflow-wrap:anywhere; }
+.research-paper-selection h3 { display:flex; flex-wrap:wrap; justify-content:space-between; gap:7px; color:#d6caef; font-size:12px; }
+.research-paper-selection h3 span { color:#a798bb; font-size:10px; font-weight:400; }
+.research-paper-selection p { color:#b4aac3; font-size:11px; line-height:1.7; margin-top:6px; }
 @media (max-width:500px) {
   .conversation-turns { padding:13px; gap:18px; max-height:650px; }
   .conversation-answer { padding:12px; margin-right:0; }

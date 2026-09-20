@@ -71,6 +71,11 @@ class Paper2AgentTests(unittest.IsolatedAsyncioTestCase):
             "https://arxiv.org/pdf/1706.03762.pdf": "https://arxiv.org/pdf/1706.03762",
             "https://arxiv.org/abs/hep-th/9901001v2": "https://arxiv.org/pdf/hep-th/9901001v2",
             "https://arxiv.org/html/1706.03762v7": "https://arxiv.org/pdf/1706.03762v7",
+            "https://doi.org/10.48550/arxiv.2411.06165": "https://arxiv.org/pdf/2411.06165",
+            "https://dx.doi.org/10.48550/arXiv.1706.03762v7": "https://arxiv.org/pdf/1706.03762v7",
+            "https://export.arxiv.org/abs/1706.03762": "https://arxiv.org/pdf/1706.03762",
+            "https://ar5iv.labs.arxiv.org/html/1104.2051": "https://arxiv.org/pdf/1104.2051",
+            "https://ar5iv.org/html/hep-th/9709062": "https://arxiv.org/pdf/hep-th/9709062",
             "https://arxiv.org/pdf/math.GT/0309136": None,
         }
         for source, expected in valid.items():
@@ -79,7 +84,10 @@ class Paper2AgentTests(unittest.IsolatedAsyncioTestCase):
                        "https://arxiv.org@evil.example/pdf/1706.03762", "https://user:secret@arxiv.org/pdf/1706.03762",
                        "https://arxiv.org:7860/pdf/1706.03762", "file:///tmp/paper.pdf",
                        "https://arxiv.org/pdf/../../secret", "https://arxiv.org/html/not-an-id",
-                       "https://arxiv.org/pdf/1706.03762\\x", "https://arxiv.org/pdf/1706.03762\n"):
+                       "https://arxiv.org/pdf/1706.03762\\x", "https://arxiv.org/pdf/1706.03762\n",
+                       "https://doi.org/10.1000/arxiv.2411.06165", "https://doi.org.evil.example/10.48550/arxiv.2411.06165",
+                       "https://doi.org/abs/2411.06165", "https://doi.org/10.48550/arxiv.2411.06165/../../secret",
+                       "https://ar5iv.labs.arxiv.org.evil.example/html/1104.2051"):
             self.assertIsNone(arxiv_pdf_url(source))
 
     async def test_unsupported_sources_and_missing_runtime_fall_back_visibly(self):

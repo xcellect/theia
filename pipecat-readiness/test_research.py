@@ -65,6 +65,21 @@ class GroundingTests(unittest.TestCase):
                 validate_routing(result)
         self.assertEqual(validate_routing(DECISION)["intent"]["choice"], "critique")
 
+    def test_jev_reading_scope_and_saved_paper_scores_are_validated(self):
+        decision = deepcopy(DECISION)
+        decision["answers"].update(reading_scope={"type": "choice", "choice": "single", "confidence": 0.97},
+                                   saved_paper_0={"type": "noul", "noul": 0.92})
+        validated = validate_routing(decision)
+        self.assertEqual(validated["reading_scope"]["choice"], "single")
+        self.assertEqual(validated["saved_paper_0"]["noul"], 0.92)
+        decision["answers"]["reading_scope"]["choice"] = "invented"
+        with self.assertRaises(ResearchError):
+            validate_routing(decision)
+        decision["answers"]["reading_scope"]["choice"] = "single"
+        decision["answers"]["saved_paper_0"]["noul"] = True
+        with self.assertRaises(ResearchError):
+            validate_routing(decision)
+
     def test_citations_are_resolved_only_to_loaded_sources(self):
         run = ResearchRun("run1", "Question", [])
         run.sources = {"S1": {"id": "S1", "title": "Test", "section": "Overview", "startLine": 1, "endLine": 2}}
@@ -331,6 +346,7 @@ class SearchOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(seen[0]["state"]["search_available"])
         self.assertEqual(seen[0]["state"]["available_sources"], [])
         self.assertEqual(set(seen[0]["questions"]["acquisition"]["criteria"]), {"search", "provided", "clarify"})
+        self.assertEqual(set(seen[0]["questions"]["reading_scope"]["criteria"]), {"single", "multiple", "topic"})
         self.assertEqual(answers["acquisition"]["choice"], "search")
 
 

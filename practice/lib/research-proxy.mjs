@@ -89,6 +89,7 @@ function safeHealth(data) {
   }
   if (data.paper2agent && typeof data.paper2agent.available === 'boolean' && data.paper2agent.mode === 'draft' && data.paper2agent.supported === 'arxiv') {
     result.paper2agent = { available: data.paper2agent.available, mode: 'draft', supported: 'arxiv' };
+    if (Number.isInteger(data.paper2agent.maxPapers) && data.paper2agent.maxPapers >= 1 && data.paper2agent.maxPapers <= 8) result.paper2agent.maxPapers = data.paper2agent.maxPapers;
   }
   if (Array.isArray(data.sources)) result.sources = data.sources.slice(0, 30).map(source => {
     if (!source || typeof source !== 'object') throw new Error('Invalid source metadata');

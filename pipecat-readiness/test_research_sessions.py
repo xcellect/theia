@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI
 import httpx
 
-from research import ResearchError, ResearchRunner, register_research_routes
+from research import ResearchError, ResearchRun, ResearchRunner, register_research_routes
+from research_limits import MAX_READING_PAPERS
 
 
 ENV = {"TYPESAFE_API_KEY": "fixture", "GENERALCOMPUTE_API_KEY": "fixture",
@@ -229,6 +230,99 @@ class PaperSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.prepared[0][0][0]["text"], "")
         self.assertIn("PDF provides measured evaluation", next(iter(run.sources.values()))["text"])
         self.assertIn("Paper2Agent draft", run.markdown)
+
+    async def test_five_papers_all_receive_bounded_evidence_and_only_two_readers_run_at_once(self):
+        papers = [dict(PAPERS[0], id=f"S{index+1}", title=f"Paper {index+1}",
+                       url=f"https://arxiv.org/abs/2401.{index:05}", text=f"Evidence for paper {index}. " * 600,
+                       selectionReason=f"Jev selected relevant paper {index+1}.") for index in range(MAX_READING_PAPERS)]
+        self.select.side_effect = None
+        self.select.return_value = papers
+        active = peak = 0
+        async def concurrent_model(run, messages, max_tokens, event_type, **fields):
+            nonlocal active, peak
+            if event_type == "paper.agent.delta":
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.01)
+                try:
+                    return await self.model(run, messages, max_tokens, event_type, **fields)
+                finally:
+                    active -= 1
+            return await self.model(run, messages, max_tokens, event_type, **fields)
+        self.runner._stream_model = concurrent_model
+        run = await self.start("Analyze relevant papers about attention methods")
+        self.assertEqual(len(run.sources), MAX_READING_PAPERS)
+        self.assertEqual(peak, 2)
+        self.assertEqual(sum(len(source["text"]) for source in run.sources.values()), 16000)
+        self.assertTrue(all(len(source["text"]) == 3200 for source in run.sources.values()))
+        self.assertEqual(self.runner.health()["paper2agent"]["maxPapers"], MAX_READING_PAPERS)
+        self.assertEqual(self.runner._validate_paper_ids(run.session_id, run.paper_ids), run.paper_ids)
+        writer = next(call for call in self.model_calls if call[1] == "report.delta")
+        for source in run.sources.values():
+            self.assertIn(source["text"], writer[2][-1]["content"])
+        selected = [event["payload"] for event in run.events if event["type"] == "paper.selected"]
+        self.assertTrue(all(event["message"].startswith("Jev selected relevant paper") for event in selected))
+
+    async def test_jev_specific_target_overrides_multiple_selected_checkboxes(self):
+        run = await self.start()
+        papers = self.runner._paper_catalog(run)
+        target = next(paper["paperId"] for paper in papers if paper["title"] == "BERT")
+        answers, _ = await self.route(run)
+        answers.update(action={"choice": "answer_paper"}, target={"choice": target}, reading_scope={"choice": "single"})
+        followup = ResearchRun("followup", "Explain BERT's masking objective only", [], session_id=run.session_id, paper_ids=run.paper_ids)
+        self.assertEqual(self.runner._resolve_paper_route(followup, answers), ("answer_paper", [target]))
+
+    async def test_jev_relevance_chooses_saved_subset_instead_of_all_selected_papers(self):
+        sources = [dict(PAPERS[0], title=f"Paper {index}", url=f"https://arxiv.org/abs/2401.{index:05}") for index in range(5)]
+        papers = [self.runner.workspace.save_paper("saved-set", source) for source in sources]
+        run = ResearchRun("followup", "Compare the first and third papers", [], session_id="saved-set", paper_ids=[p["paperId"] for p in papers])
+        catalog = self.runner._paper_catalog(run)
+        chosen = {papers[0]["paperId"], papers[2]["paperId"]}
+        answers = {"intent": {"choice": "compare"}, "action": {"choice": "compare_papers"},
+                   "target": {"choice": "all"}, "reading_scope": {"choice": "multiple"},
+                   **{f"saved_paper_{index}": {"noul": 0.95 if p["paperId"] in chosen else 0.05} for index, p in enumerate(catalog)}}
+        action, targets = self.runner._resolve_paper_route(run, answers)
+        self.assertEqual(action, "compare_papers")
+        self.assertEqual(set(targets), chosen)
+
+    async def test_non_arxiv_fallback_skips_preparation_and_labels_the_exa_evidence(self):
+        self.select.side_effect = None
+        self.select.return_value = []
+        self.acquire.side_effect = None
+        self.acquire.return_value = [dict(PAPERS[0], url="https://journal.example/paper")]
+        run = await self.start("Find relevant attention papers")
+        self.runner.paper2agent.prepare.assert_not_awaited()
+        skipped = next(event["payload"] for event in run.events if event["type"] == "paper2agent.skipped")
+        self.assertEqual(skipped["status"], "excerpt_only")
+        self.assertEqual(skipped["title"], PAPERS[0]["title"])
+        self.assertIn("paperId", skipped)
+        self.assertFalse(any(event["type"] == "paper2agent.failed" for event in run.events))
+
+    async def test_unmatched_single_paper_does_not_analyze_unrelated_search_excerpts(self):
+        self.select.side_effect = None
+        self.select.return_value = []
+        original_route = self.route
+        async def single_route(run):
+            answers, model = await original_route(run)
+            answers["reading_scope"] = {"choice": "single"}
+            return answers, model
+        self.runner._routing = single_route
+        run = await self.runner.start({"clientRequestId": "single", "sessionId": "session-one", "sourceIds": [],
+            "question": "Analyze https://arxiv.org/abs/2501.09999 only", "paper2agentEnabled": True})
+        await run.task
+        self.assertEqual(run.events[-1]["type"], "run.failed")
+        self.assertIn("requested paper", run.events[-1]["payload"]["message"])
+        self.assertEqual(run.sources, {})
+        self.assertEqual(self.model_calls, [])
+        self.assertEqual(self.select.await_args.kwargs["reading_scope"], "single")
+
+    async def test_rejected_arxiv_candidates_remain_excerpts_without_pdf_preparation(self):
+        self.select.side_effect = None
+        self.select.return_value = []
+        run = await self.start("Find relevant attention papers")
+        self.runner.paper2agent.prepare.assert_not_awaited()
+        self.assertTrue(all(source["packId"] == "exa" for source in run.sources.values()))
+        self.assertEqual(sum(event["type"] == "paper2agent.skipped" for event in run.events), 2)
 
     async def test_paper_selection_cannot_read_another_sessions_memory(self):
         run = await self.start()

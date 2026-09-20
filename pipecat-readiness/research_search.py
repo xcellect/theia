@@ -9,6 +9,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from research_limits import MAX_PAPER_CANDIDATES
+
 EXA_BASE = "https://api.exa.ai"
 MAX_SOURCES = 8
 MAX_EVIDENCE_CHARS = 16000
@@ -162,7 +164,7 @@ async def acquire_sources(question, api_key, emit, *, urls=None, http=None,
         requested = list(dict.fromkeys(public_url(value) for value in urls))
     endpoint = "contents" if requested else "search"
     payload = {"urls": requested, "text": True} if requested else {
-        "query": question.strip(), "category": "publication", "numResults": 5,
+        "query": question.strip(), "category": "publication", "numResults": MAX_PAPER_CANDIDATES if candidates is not None else 5,
         "contents": {"text": True},
     }
     if candidates is not None:
@@ -178,6 +180,9 @@ async def acquire_sources(question, api_key, emit, *, urls=None, http=None,
                 for domain in include_domains):
             raise ExaSearchError("invalid_query", "Use a valid publication domain filter.")
         payload["includeDomains"] = list(include_domains)[:8]
+        # The live publication endpoint rejects domain filters; the ordinary
+        # search endpoint accepts them and still returns arXiv publications.
+        payload.pop("category", None)
     emit("search.started", query=question.strip(), provider="Exa", mode="url" if requested else "search")
     if requested:
         for url in requested:

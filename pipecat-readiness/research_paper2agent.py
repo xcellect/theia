@@ -46,13 +46,20 @@ def arxiv_pdf_url(value):
         return None
     try:
         parsed = urlsplit(value)
-        if (parsed.scheme not in {"http", "https"} or parsed.hostname != "arxiv.org"
+        if (parsed.scheme not in {"http", "https"} or parsed.hostname not in {"arxiv.org", "export.arxiv.org", "ar5iv.labs.arxiv.org", "ar5iv.org", "doi.org", "dx.doi.org"}
                 or parsed.username is not None or parsed.password is not None
                 or parsed.port not in {None, 80, 443}):
             return None
     except ValueError:
         return None
-    match = re.fullmatch(r"/(?:abs|pdf|html)/((?:\d{4}\.\d{4,5}|[a-z][a-z0-9.-]*/\d{7})(?:v[1-9]\d*)?)(?:\.pdf)?/?", parsed.path)
+    path = parsed.path
+    if parsed.hostname in {"doi.org", "dx.doi.org"}:
+        # Exa's publication index can return the registered arXiv DOI rather
+        # than an abs/PDF URL. Only this exact DOI namespace maps to arXiv.
+        path = re.sub(r"^/10\.48550/arxiv\.", "/abs/", path, flags=re.I)
+        if path == parsed.path:
+            return None
+    match = re.fullmatch(r"/(?:abs|pdf|html)/((?:\d{4}\.\d{4,5}|[a-z][a-z0-9.-]*/\d{7})(?:v[1-9]\d*)?)(?:\.pdf)?/?", path)
     return f"https://arxiv.org/pdf/{match[1]}" if match else None
 
 
@@ -392,7 +399,7 @@ class Paper2AgentWorker:
                        if arxiv_pdf_url(source.get("url"))), None)
         if not chosen:
             emit("paper2agent.failed", status="unsupported", sourceId=None,
-                 message="Paper2Agent draft preparation currently supports arXiv papers. Continuing with the Exa excerpts.")
+                 message="No arXiv PDF was resolved for this source. Its Exa excerpt can be analyzed, but Paper2Agent has not prepared a PDF for it.")
             return sources
         index, source, pdf_url = chosen
         if not self.available():

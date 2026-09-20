@@ -52,6 +52,20 @@ class SearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Abstract only", sources[0]["coverage"])
         self.assertEqual(self.events[1][0], "source.fetch.started")
 
+    async def test_arxiv_filtered_discovery_uses_compatible_search_payload(self):
+        candidates = []
+        def respond(request):
+            payload = json.loads(request.content)
+            self.assertEqual(payload["includeDomains"], ["arxiv.org"])
+            self.assertEqual(payload["numResults"], 8)
+            self.assertNotIn("category", payload)
+            return httpx.Response(200, json={"results": [{"url": "https://arxiv.org/abs/2411.06165", "title": "An arXiv paper"}]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            sources = await acquire_sources("Find supporting evidence", "key", self.emit, http=client,
+                include_domains=["arxiv.org"], candidates=candidates, allow_empty=True)
+        self.assertEqual(sources, [])
+        self.assertEqual(len(candidates), 1)
+
     async def test_metadata_summary_bad_text_and_duplicates_are_not_evidence(self):
         rows = [
             {"url": "https://papers.example.org/metadata", "summary": TEXT},
