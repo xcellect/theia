@@ -3,6 +3,7 @@ const backend = 'http://127.0.0.1:7860/research';
 const noStore = { 'Cache-Control': 'no-store, private', Vary: 'Origin' };
 const bodyLimit = 128 * 1024;
 const responseLimit = 256 * 1024;
+const workspaceResponseLimit = 4 * 1024 * 1024;
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
 const knownSettings = [
   'TYPESAFE_API_KEY', 'TYPESAFE_MODEL', 'GENERALCOMPUTE_API_KEY',
@@ -16,8 +17,8 @@ const messages = {
   RUN_NOT_FOUND: 'This research run is no longer available. Submit your question again.',
   REPLAY_EXPIRED: 'This research stream has expired. Submit your question again.',
   SOURCE_NOT_FOUND: 'This source is no longer available for the selected run.',
-  SESSION_NOT_FOUND: 'The voice session ended. Start a new voice session.',
-  SESSION_BUSY: 'A voice session is already running. End it before starting another.',
+  SESSION_NOT_FOUND: 'This conversation or voice session is no longer available. Start a new conversation.',
+  SESSION_BUSY: 'Research or voice is active in this conversation. Stop it before continuing.',
   CONNECTION_FAILED: 'The voice connection could not be established. Try starting it again.',
   REQUEST_FAILED: 'The research server could not complete this request. Please retry.',
 };
@@ -44,7 +45,8 @@ function endpointFor(path) {
   if (route === 'health' || route === 'voice/health') return { route, kind: 'health', methods: ['GET'] };
   if (route === 'voice/offer') return { route, kind: 'offer', methods: ['POST', 'PATCH'] };
   if (route === 'context') return { route, kind: 'context', methods: ['POST'] };
-  if (route === 'sessions' || (parts[0] === 'sessions' && parts.length === 2)) return { route, kind: 'workspace', methods: ['GET'] };
+  if (route === 'sessions') return { route, kind: 'workspace', methods: ['GET'] };
+  if (parts[0] === 'sessions' && parts.length === 2) return { route, kind: 'workspace', methods: ['GET', 'DELETE'] };
   if (route === 'runs') return { route, kind: 'run', methods: ['POST'] };
   if (parts[0] === 'runs' && parts.length === 3 && parts[2] === 'events') return { route, kind: 'events', methods: ['GET'] };
   if (parts[0] === 'runs' && parts.length === 3 && parts[2] === 'cancel') return { route, kind: 'run', methods: ['POST'] };
@@ -118,15 +120,18 @@ function fields(data, keys) {
 }
 
 function safeWorkspace(data) {
-  const run = item => fields(item, ['runId', 'question', 'status', 'createdAt', 'updatedAt']);
+  const run = item => fields(item, ['runId', 'question', 'status', 'createdAt', 'updatedAt', 'markdown', 'done', 'partial']);
   if (Array.isArray(data.sessions)) return { sessions: data.sessions.slice(0, 50).map(item => fields(item,
     ['sessionId', 'title', 'paperCount', 'latestRunId', 'status', 'createdAt', 'updatedAt'])) };
   if (typeof data.sessionId !== 'string' || !idPattern.test(data.sessionId) || !Array.isArray(data.papers) || !Array.isArray(data.runs)) throw new Error('Invalid workspace');
   return {
     sessionId: data.sessionId,
     summary: typeof data.summary === 'string' ? data.summary.slice(0, 3000) : '',
-    runs: data.runs.slice(-100).map(run),
-    messages: Array.isArray(data.messages) ? data.messages.slice(-20).map(item => fields(item, ['messageId', 'role', 'content', 'runId'])) : [],
+    runs: data.runs.slice(-20).map(run),
+    messages: Array.isArray(data.messages) ? data.messages.slice(-40).map(item => fields(item, ['messageId', 'role', 'content', 'runId', 'status', 'createdAt'])) : [],
+    totalRuns: Number.isSafeInteger(data.totalRuns) && data.totalRuns >= 0 ? data.totalRuns : data.runs.length,
+    hasMore: data.hasMore === true,
+    nextBefore: typeof data.nextBefore === 'string' && idPattern.test(data.nextBefore) ? data.nextBefore : null,
     papers: data.papers.slice(-50).map(paper => ({
       ...fields(paper, ['paperId', 'sourceId', 'title', 'url', 'coverage', 'status', 'version']),
       reports: Array.isArray(paper.reports) ? paper.reports.slice(-50).map(run) : [],
@@ -144,6 +149,10 @@ function safeWorkspace(data) {
 }
 
 function safeResponse(data, kind, method) {
+  if (kind === 'workspace' && method === 'DELETE') {
+    if (data.status !== 'deleted' || typeof data.sessionId !== 'string' || !idPattern.test(data.sessionId)) throw new Error('Invalid deletion response');
+    return { sessionId: data.sessionId, status: 'deleted' };
+  }
   if (kind === 'workspace') return safeWorkspace(data);
   if (kind === 'health') return safeHealth(data);
   if (kind === 'source') return safeSource(data);
@@ -211,8 +220,16 @@ export async function proxyResearch(request, path, { fetchImpl = fetch } = {}) {
     (request.method !== 'GET' && !origin)) return failure('INVALID_REQUEST', 403);
   if (!endpoint.methods.includes(request.method)) return failure('INVALID_REQUEST', 405);
 
+  let query = '';
+  const before = new URL(request.url).searchParams.getAll('before');
+  if (before.length) {
+    if (request.method !== 'GET' || endpoint.kind !== 'workspace' || endpoint.route === 'sessions' ||
+        before.length !== 1 || !idPattern.test(before[0])) return failure('INVALID_REQUEST', 400);
+    query = `?before=${encodeURIComponent(before[0])}`;
+  }
+
   let body;
-  if (request.method !== 'GET') {
+  if (request.method !== 'GET' && (request.method !== 'DELETE' || request.body)) {
     if (request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json') return failure('INVALID_REQUEST', 415);
     try { body = JSON.stringify(await readJson(request.body, bodyLimit)); }
     catch { return failure('INVALID_REQUEST', 400); }
@@ -228,7 +245,7 @@ export async function proxyResearch(request, path, { fetchImpl = fetch } = {}) {
   }
   const disconnected = new AbortController();
   try {
-    const response = await fetchImpl(`${backend}/${endpoint.route}`, {
+    const response = await fetchImpl(`${backend}/${endpoint.route}${query}`, {
       method: request.method, headers, ...(body ? { body } : {}), cache: 'no-store', redirect: 'error',
       signal: AbortSignal.any([request.signal, disconnected.signal,
         AbortSignal.timeout(endpoint.kind === 'events' ? 390000 : endpoint.kind === 'health' ? 5000 : 25000)]),
@@ -239,7 +256,7 @@ export async function proxyResearch(request, path, { fetchImpl = fetch } = {}) {
         ...noStore, 'Content-Type': 'text/event-stream; charset=utf-8', 'X-Accel-Buffering': 'no',
       } });
     }
-    const data = response.status === 204 ? {} : await readJson(response.body, responseLimit);
+    const data = response.status === 204 ? {} : await readJson(response.body, endpoint.kind === 'workspace' ? workspaceResponseLimit : responseLimit);
     if (!response.ok) {
       const code = data.error?.code;
       const safeCode = code === 'MISSING_CONFIG' || Object.hasOwn(messages, code) ? code : 'REQUEST_FAILED';

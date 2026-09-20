@@ -247,3 +247,64 @@ test('persistent workspace routes expose only public session and job fields', as
   const listed = await proxyResearch(request('sessions'), 'sessions', { fetchImpl: async () => Response.json({ sessions: [{ sessionId: 'session-1', title: 'Paper', latestRunId: 'run-1', paperCount: 1, databasePath: '/private/state.sqlite' }] }) });
   assert.deepEqual((await listed.json()).sessions, [{ sessionId: 'session-1', title: 'Paper', latestRunId: 'run-1', paperCount: 1 }]);
 });
+
+test('conversation pages forward only a validated cursor and preserve full reports and turn metadata', async () => {
+  const markdown = '# Complete report\n\n' + 'A cited finding. '.repeat(17000);
+  const payload = {
+    sessionId: 'session-1', papers: [], summary: '', totalRuns: 25, hasMore: true, nextBefore: 'run-5',
+    runs: [{ runId: 'run-5', question: 'Explain it', markdown, done: true, partial: true, status: 'completed', createdAt: '2026-09-19', privateFile: '/private/path' }],
+    messages: Array.from({ length: 40 }, (_, index) => ({ messageId: index, role: index % 2 ? 'assistant' : 'user', content: 'Turn content', runId: `run-${index >> 1}`, status: 'completed', createdAt: '2026-09-19', privateFile: '/private/path' })),
+  };
+  const response = await proxyResearch(request('sessions/session-1?before=run-25&host=untrusted'), ['sessions', 'session-1'], {
+    fetchImpl: async (url, options) => {
+      assert.equal(url, 'http://127.0.0.1:7860/research/sessions/session-1?before=run-25');
+      assert.equal(options.method, 'GET');
+      return Response.json(payload);
+    },
+  });
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.runs[0].markdown, markdown);
+  assert.equal(data.runs[0].done, true);
+  assert.equal(data.runs[0].partial, true);
+  assert.equal(data.messages.length, 40);
+  assert.equal(data.messages[0].createdAt, '2026-09-19');
+  assert.equal(data.totalRuns, 25);
+  assert.equal(data.nextBefore, 'run-5');
+  assert.equal(data.hasMore, true);
+  assert.doesNotMatch(JSON.stringify(data), /private/);
+  for (const query of ['before=', 'before=..%2Frun', 'before=one&before=two']) {
+    assert.equal((await proxyResearch(request(`sessions/session-1?${query}`), ['sessions', 'session-1'], { fetchImpl: mustNotFetch })).status, 400);
+  }
+});
+
+test('conversation deletion is same-origin, allowlisted, sanitized and accepts empty or JSON bodies', async () => {
+  for (const body of [undefined, '{}']) {
+    const response = await proxyResearch(request('sessions/session-1', { method: 'DELETE', ...(body ? { body } : {}) }), ['sessions', 'session-1'], {
+      fetchImpl: async (url, options) => {
+        assert.equal(url, 'http://127.0.0.1:7860/research/sessions/session-1');
+        assert.equal(options.method, 'DELETE');
+        assert.equal(options.body, body);
+        return Response.json({ sessionId: 'session-1', status: 'deleted', privatePath: '/private/path' });
+      },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { sessionId: 'session-1', status: 'deleted' });
+  }
+  for (const headers of [{}, { origin: 'https://untrusted.example' }, { origin: 'http://localhost:3000', 'sec-fetch-site': 'cross-site' }]) {
+    assert.equal((await proxyResearch(request('sessions/session-1', { method: 'DELETE', headers }), ['sessions', 'session-1'], { fetchImpl: mustNotFetch })).status, 403);
+  }
+  for (const path of ['sessions', 'runs/run-1/events', 'runs']) {
+    assert.equal((await proxyResearch(request(path, { method: 'DELETE', body: null }), path, { fetchImpl: mustNotFetch })).status, 405);
+  }
+  const busy = await proxyResearch(request('sessions/session-1', { method: 'DELETE' }), ['sessions', 'session-1'], {
+    fetchImpl: async () => Response.json({ error: { code: 'SESSION_BUSY', message: 'private internals' } }, { status: 409 }),
+  });
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).error.code, 'SESSION_BUSY');
+  const malformed = await proxyResearch(request('sessions/session-1', { method: 'DELETE' }), ['sessions', 'session-1'], {
+    fetchImpl: async () => Response.json({ sessionId: '../private', status: 'deleted', path: '/private' }),
+  });
+  assert.equal(malformed.status, 503);
+  assert.doesNotMatch(await malformed.text(), /private/);
+});

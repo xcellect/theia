@@ -666,11 +666,22 @@ def register_research_routes(app, runner):
         return {"sessions": runner.workspace.sessions()}
 
     @app.get("/research/sessions/{session_id}")
-    async def session(session_id: str):
+    async def session(session_id: str, before: str | None = None):
         try:
-            return runner.public_session(session_id)
+            return runner.public_session(session_id, before)
         except ValueError:
             return failure(ResearchError("Invalid session reference."))
+
+    @app.delete("/research/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        try:
+            return await runner.delete_session(session_id)
+        except ResearchError as error:
+            return failure(error)
+        except ValueError:
+            return failure(ResearchError("Invalid session reference."))
+        except OSError:
+            return failure(ResearchError("Conversation files could not be removed. Please retry.", code="REQUEST_FAILED", status=500))
 
     @app.post("/research/context")
     async def voice_context(request: Request):

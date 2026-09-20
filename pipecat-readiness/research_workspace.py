@@ -11,10 +11,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import tempfile
 import threading
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -396,9 +398,63 @@ class WorkspaceStore:
                     "\nRecent turns:\n" + "\n".join(reversed(recent)) +
                     "\nPaper finding notes (retain their status):\n" + "\n".join(notes))
 
-    def session(self, session_id):
+    def session_exists(self, session_id):
         with self.lock:
-            result = self.ensure_session(session_id)
+            return bool(self.db.execute("SELECT 1 FROM sessions WHERE id=?", (_id(session_id),)).fetchone())
+
+    def delete_session(self, session_id):
+        """Remove one inactive workspace and its dependent rows, never shared caches."""
+        session_id = _id(session_id)
+        with self.lock:
+            if not self.db.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone():
+                return False
+            if any(not json.loads(row["snapshot"]).get("done") for row in self.db.execute(
+                    "SELECT snapshot FROM runs WHERE session_id=?", (session_id,))):
+                raise RuntimeError("Conversation research is still running.")
+            if any(json.loads(row["body"]).get("state") in {"queued", "running", "preparing", "cloning", "started"}
+                   for row in self.db.execute("SELECT body FROM jobs WHERE session_id=?", (session_id,))):
+                raise RuntimeError("Conversation jobs are still running.")
+            directory = self._path("sessions", session_id)
+            if directory.is_symlink() or directory.parent.is_symlink():
+                raise ValueError("Conversation directory cannot be a symbolic link.")
+            staged = self._path(".deleted-" + uuid4().hex)
+            moved = directory.exists()
+            if moved:
+                directory.rename(staged)
+            try:
+                with self.db:
+                    for table in ("jobs", "paper_answers", "papers", "messages"):
+                        self.db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+                    self.db.execute("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE session_id=?)", (session_id,))
+                    self.db.execute("DELETE FROM runs WHERE session_id=?", (session_id,))
+                    self.db.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+            except Exception:
+                if moved:
+                    staged.rename(directory)
+                raise
+            if moved:
+                shutil.rmtree(staged)
+            return True
+
+    def session(self, session_id, *, before=None, limit=None, create=True):
+        with self.lock:
+            session_id = _id(session_id)
+            if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100):
+                raise ValueError("Invalid conversation page size.")
+            if before is not None:
+                before = _id(before)
+                cursor = self.db.execute("SELECT created,id FROM runs WHERE session_id=? AND id=?", (session_id, before)).fetchone()
+                if cursor is None:
+                    raise ValueError("Invalid conversation history cursor.")
+            else:
+                cursor = None
+            row = self.db.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+            if not row and not create:
+                return {"sessionId": session_id, "summary": "", "papers": [], "runs": [], "messages": [],
+                        "totalRuns": 0, "hasMore": False, "nextBefore": None}
+            result = self.ensure_session(session_id) if not row else {
+                "sessionId": session_id, "createdAt": row["created"], "updatedAt": row["updated"],
+                "summary": row["summary"], "summarizedThroughMessageId": row["summarized_through"]}
             papers = []
             for row in self.db.execute("SELECT metadata FROM papers WHERE session_id=? ORDER BY created,paper_id", (session_id,)):
                 paper = json.loads(row["metadata"])
@@ -406,14 +462,36 @@ class WorkspaceStore:
                     for item in self.db.execute("SELECT run_id,status,created FROM paper_answers WHERE session_id=? AND paper_id=? ORDER BY created", (session_id, paper["paperId"]))]
                 paper["jobs"] = [json.loads(item["body"]) for item in self.db.execute("SELECT body FROM jobs WHERE session_id=? AND paper_id=? ORDER BY updated", (session_id, paper["paperId"]))]
                 papers.append(paper)
+            query, parameters = "SELECT snapshot FROM runs WHERE session_id=?", [session_id]
+            if cursor:
+                query += " AND (created,id) < (?,?)"
+                parameters.extend((cursor["created"], cursor["id"]))
+            query += " ORDER BY created DESC,id DESC"
+            if limit is not None:
+                query += " LIMIT ?"
+                parameters.append(limit + 1)
+            rows = self.db.execute(query, parameters).fetchall()
+            has_more = limit is not None and len(rows) > limit
+            rows = rows[:limit] if limit is not None else rows
             runs = []
-            for row in self.db.execute("SELECT snapshot FROM runs WHERE session_id=? ORDER BY created", (session_id,)):
+            for row in reversed(rows):
                 snapshot = json.loads(row["snapshot"])
-                runs.append({key: snapshot.get(key) for key in ("runId", "sessionId", "question", "status", "createdAt", "updatedAt", "done")})
+                run = {key: snapshot.get(key) for key in ("runId", "sessionId", "question", "status", "createdAt", "updatedAt", "done", "markdown")}
+                # Old snapshots did not save this flag, but the terminal event
+                # does. Preserve uncertainty when reopening those reports.
+                last = self.db.execute("SELECT body FROM events WHERE run_id=? ORDER BY seq DESC LIMIT 1", (run["runId"],)).fetchone()
+                terminal = json.loads(last["body"]) if last else {}
+                run["partial"] = snapshot.get("partial") is True or terminal.get("payload", {}).get("partial") is True
+                runs.append(run)
+            run_ids = [run["runId"] for run in runs]
             messages = [{"messageId": row["id"], "runId": row["run_id"], "role": row["role"], "content": row["content"],
                          "status": row["status"], "createdAt": row["created"]} for row in self.db.execute(
-                "SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,))]
-            return dict(result, papers=papers, runs=runs, messages=messages)
+                "SELECT * FROM messages WHERE session_id=?" +
+                (" AND run_id IN (" + ",".join("?" for _ in run_ids) + ")" if limit is not None else "") +
+                " ORDER BY id", [session_id, *run_ids] if limit is not None else [session_id])] if run_ids else []
+            total = self.db.execute("SELECT COUNT(*) FROM runs WHERE session_id=?", (session_id,)).fetchone()[0]
+            return dict(result, papers=papers, runs=runs, messages=messages, totalRuns=total,
+                        hasMore=has_more, nextBefore=runs[0]["runId"] if has_more else None)
 
     def sessions(self):
         with self.lock:

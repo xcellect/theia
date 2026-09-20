@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import ResearchLibrary from "./ResearchLibrary";
+import ResearchConversation from "./ResearchConversation";
 import ResearchOrb, { type OrbState } from "./ResearchOrb";
 import ResearchMarkdown from "./ResearchMarkdown";
 import type { ResearchIntentPreview, ResearchActivity } from "./PipecatSession";
@@ -35,7 +36,7 @@ function SourceDrawer({ source, onClose }: { source: Source; onClose: () => void
     <div className="research-drawer-head"><span className="research-eyebrow">SOURCE {source.id}</span><button className="research-icon-button" onClick={onClose} aria-label="Close source"><Icon name="close" /></button></div>
     <h2>{source.title}</h2><p className="research-source-location">{source.section || source.path || source.description || "Source excerpt"}</p>
     {source.url && /^https?:\/\//.test(source.url) && <a className="research-original-link" href={source.url} target="_blank" rel="noopener noreferrer">Open original source <Icon name="arrow" size={14} /></a>}
-    <pre className="research-source-text">{source.text || "No excerpt is available for this source yet."}</pre>
+    <div className="research-source-text"><ResearchMarkdown text={source.text || "No excerpt is available for this source yet."} /></div>
     <p className="research-source-note">{source.coverage ? `Coverage: ${source.coverage}. ` : ""}This is the text provided to the agents; extracted excerpts may not contain the full paper. Repository analysis is static reading.</p>
   </dialog>;
 }
@@ -104,6 +105,7 @@ export default function ResearchWorkspace() {
   const [report, setReport] = useState("");
   const [reportDone, setReportDone] = useState(false);
   const [reportPartial, setReportPartial] = useState(false);
+  const [runStatus, setRunStatus] = useState("running");
   const [verification, setVerification] = useState("");
   const [notice, setNotice] = useState("");
   const [problem, setProblem] = useState("");
@@ -119,6 +121,8 @@ export default function ResearchWorkspace() {
   const mounted = useRef(true);
   const questionInput = useRef<HTMLTextAreaElement>(null);
   const startedAt = useRef(0);
+  const analysisPanel = useRef<HTMLDivElement>(null);
+  const sourceRequest = useRef<AbortController | null>(null);
 
   const refreshHealth = useCallback(async () => {
     setCheckingHealth(true);
@@ -132,7 +136,7 @@ export default function ResearchWorkspace() {
     } finally { if (mounted.current) setCheckingHealth(false); }
   }, []);
 
-  useEffect(() => { mounted.current = true; void refreshHealth(); return () => { mounted.current = false; events.current?.close(); events.current = null; activeRun.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); }; }, [refreshHealth]);
+  useEffect(() => { mounted.current = true; void refreshHealth(); return () => { mounted.current = false; events.current?.close(); events.current = null; sourceRequest.current?.abort(); activeRun.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); }; }, [refreshHealth]);
   useEffect(() => {
     if (!busy) return;
     const interval = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt.current) / 1000)), 1000);
@@ -182,19 +186,20 @@ export default function ResearchWorkspace() {
     events.current?.close();
     if (streamDeadline.current) clearTimeout(streamDeadline.current);
     activeRun.current = id;
+    sourceRequest.current?.abort(); setSourceDrawer(null); if (history) setIntentPreview(null);
     try { sessionStorage.setItem(RUN_KEY, JSON.stringify({ sessionId: sessionRef.current, runId: id })); } catch { /* Research works when browser storage is unavailable. */ }
     setPreviewSubmitted(true); setWorkLabel("Your question is in. Jev is selecting the analysis."); followReport.current = true;
     lastSeq.current = 0;
     startedAt.current = Date.now();
     setElapsed(0); setRunId(id); setBusy(true); setStage("routing"); setRouting(null); setAgents(INITIAL_AGENTS);
-    setReport(""); setReportDone(false); setReportPartial(false); setVerification(""); setSources([]); setProblem(""); setNotice(""); setActivity([]);
+    setReport(""); setReportDone(false); setReportPartial(false); setRunStatus("running"); setVerification(""); setSources([]); setProblem(""); setNotice(""); setActivity([]);
     setSearchQuery(""); setSearchState("idle"); setSearchResults([]); setPaperPreparation(null); setRunQuestion(""); setPaperAgents({}); setPaperJobs({});
     const stream = new EventSource(`/api/research/runs/${encodeURIComponent(id)}/events`);
     events.current = stream;
     const finishStream = () => { stream.close(); if (events.current === stream) events.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); };
     streamDeadline.current = setTimeout(() => {
       if (activeRun.current !== id || !mounted.current) return;
-      finishStream(); stopPendingSearch("failed"); setBusy(false); setStage("error"); setReportPartial(true);
+      finishStream(); stopPendingSearch("failed"); setRunStatus("interrupted"); setBusy(false); setStage("error"); setReportPartial(true);
       setProblem("The research stream timed out. Any visible findings are partial. Retry your question to start a fresh run.");
       void fetch(`/api/research/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
     }, 375_000);
@@ -276,15 +281,15 @@ export default function ResearchWorkspace() {
         case "report.delta": setWorkLabel("Writing your sourced research report"); setReport((current) => current + text); break;
         case "report.completed": setWorkLabel(p.partial ? "A partial report is ready — evidence gaps are marked" : "Your cited research report is ready"); setReport(String(p.markdown || text)); setReportDone(true); setReportPartial(Boolean(p.partial)); log(p.partial ? "Partial report ready" : "Cited report ready"); break;
         case "clarification.required": setWorkLabel("A little more context will help"); setNotice(String(p.message || p.question || "Add a relevant source or excerpt to continue.")); break;
-        case "run.completed": setLibraryVersion((v) => v + 1); setWorkLabel(p.status === "clarification" ? "Add a little more context to continue" : p.partial ? "Report saved with evidence gaps marked" : "Research complete · report and paper workspace saved"); stopPendingSearch("stopped"); setPreviousRunId(id); setBusy(false); setStage("idle"); finishStream(); break;
-        case "run.cancelled": stopPendingSearch("stopped"); setWorkLabel("Research stopped — partial findings remain below"); setBusy(false); setStage("idle"); setNotice("Research cancelled. Any findings below are partial."); finishStream(); break;
-        case "run.failed": stopPendingSearch("failed"); setWorkLabel("Research paused — review the message below"); setBusy(false); setStage("error"); setReportPartial(true); setProblem(String(p.message || p.error || "The research run could not finish. Please retry.")); finishStream(); break;
+        case "run.completed": setRunStatus(p.status === "clarification" ? "clarification" : p.partial ? "partial" : "completed"); setLibraryVersion((v) => v + 1); setWorkLabel(p.status === "clarification" ? "Add a little more context to continue" : p.partial ? "Report saved with evidence gaps marked" : "Research complete · report and paper workspace saved"); stopPendingSearch("stopped"); setPreviousRunId(id); setBusy(false); setStage("idle"); finishStream(); break;
+        case "run.cancelled": setRunStatus("cancelled"); setLibraryVersion((v) => v + 1); stopPendingSearch("stopped"); setWorkLabel("Research stopped — partial findings remain below"); setBusy(false); setStage("idle"); setNotice("Research cancelled. Any findings below are partial."); finishStream(); break;
+        case "run.failed": setRunStatus("failed"); setLibraryVersion((v) => v + 1); stopPendingSearch("failed"); setWorkLabel("Research paused — review the message below"); setBusy(false); setStage("error"); setReportPartial(true); setProblem(String(p.message || p.error || "The research run could not finish. Please retry.")); finishStream(); break;
       }
     };
     stream.onerror = () => {
       if (activeRun.current !== id || !mounted.current || events.current !== stream) return;
       if (stream.readyState === EventSource.CLOSED) {
-        finishStream(); stopPendingSearch("failed"); setBusy(false); setStage("error"); setReportPartial(true);
+        finishStream(); stopPendingSearch("failed"); setRunStatus("interrupted"); setBusy(false); setStage("error"); setReportPartial(true);
         setProblem("This research stream is unavailable or has expired. Please run your question again.");
       } else setNotice("Connection interrupted. Reconnecting to this research run…");
     };
@@ -323,6 +328,7 @@ export default function ResearchWorkspace() {
   const newResearch = () => {
     if (busy || submitting.current) return;
     events.current?.close(); events.current = null;
+    sourceRequest.current?.abort();
     if (streamDeadline.current) clearTimeout(streamDeadline.current);
     const freshSession = crypto.randomUUID();
     sessionRef.current = freshSession; setSessionId(freshSession);
@@ -345,6 +351,13 @@ export default function ResearchWorkspace() {
     setLibraryVersion((v) => v + 1);
   };
 
+  const openSavedRun = (id: string) => {
+    if (busy) return;
+    setPreviousRunId(id);
+    if (id !== runId) followRun(id, true);
+    analysisPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!question.trim() || submitting.current || busy) return;
@@ -364,19 +377,21 @@ export default function ResearchWorkspace() {
     try {
       const response = await fetch(`/api/research/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
       if (!response.ok) throw new Error("Could not cancel the run. Please try again.");
-      events.current?.close(); events.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); stopPendingSearch("stopped"); setReportPartial(true); setBusy(false); setStage("idle"); setNotice("Research cancelled. Any findings below are partial.");
+      events.current?.close(); events.current = null; if (streamDeadline.current) clearTimeout(streamDeadline.current); stopPendingSearch("stopped"); setRunStatus("cancelled"); setLibraryVersion(value => value + 1); setReportPartial(true); setBusy(false); setStage("idle"); setNotice("Research cancelled. Any findings below are partial.");
     } catch (error) { setProblem(error instanceof Error ? error.message : "Could not cancel research."); }
   };
 
-  const openSource = async (id: string) => {
-    const source = sources.find((item) => item.id === id);
+  const openSource = async (id: string, sourceRunId = runId) => {
+    sourceRequest.current?.abort();
+    const request = new AbortController(); sourceRequest.current = request;
+    const source = sourceRunId === runId ? sources.find((item) => item.id === id) : undefined;
     if (source?.text) { setSourceDrawer(source); return; }
-    if (!runId) return;
+    if (!sourceRunId) return;
     try {
-      const response = await fetch(`/api/research/runs/${encodeURIComponent(runId)}/sources/${encodeURIComponent(id)}`);
+      const response = await fetch(`/api/research/runs/${encodeURIComponent(sourceRunId)}/sources/${encodeURIComponent(id)}`, { signal: request.signal });
       if (!response.ok) throw new Error("This source excerpt is no longer available. Run the question again to refresh it.");
-      const data = await response.json(); setSourceDrawer(data.source || data);
-    } catch (error) { setProblem(error instanceof Error ? error.message : "Could not load this source."); }
+      const data = await response.json(); if (!request.signal.aborted) setSourceDrawer(data.source || data);
+    } catch (error) { if (!request.signal.aborted) setProblem(error instanceof Error ? error.message : "Could not load this source."); }
   };
 
   const copyReport = async () => {
@@ -426,10 +441,11 @@ export default function ResearchWorkspace() {
           <div className="research-suggestions"><span className="research-eyebrow">A LITTLE CURIOSITY TO GET STARTED</span>{EXAMPLES.map((example) => <button key={example} onClick={() => selectExample(example)} disabled={busy}>{example}<Icon name="arrow" size={14} /></button>)}</div>
         </aside>
         <section className="research-results-column" aria-label="Live research and report">
-          <ResearchLibrary sessionId={sessionId} busy={busy} selectedPaperIds={selectedPaperIds} onSelect={setSelectedPaperIds} onResume={resumeSession} onOpenRun={(id) => { setPreviousRunId(id); followRun(id, true); }} refreshToken={libraryVersion} />
+          <ResearchLibrary sessionId={sessionId} busy={busy} selectedPaperIds={selectedPaperIds} onSelect={setSelectedPaperIds} onResume={resumeSession} onOpenRun={openSavedRun} onDeleteSession={id => { if (id === sessionRef.current) newResearch(); setLibraryVersion(value => value + 1); }} refreshToken={libraryVersion} />
+          <ResearchConversation sessionId={sessionId} selectedRunId={runId} currentTurn={!viewingHistory && runId && runQuestion ? { runId, question: runQuestion, markdown: report, status: runStatus, done: reportDone } : undefined} busy={busy} refreshToken={libraryVersion} onOpenRun={openSavedRun} onSource={(id, source) => void openSource(source, id)} />
           {viewingHistory && <div className="research-alert" role="status">Saved conversation report. Ask a follow-up to continue with its paper agents.</div>}
-          <div className="research-workflow research-surface"><div className="research-surface-heading"><h2><span className="research-live-dot" />Live research</h2><span className="research-workflow-meta">{busy ? `${elapsed}s elapsed` : reportDone ? reportPartial ? "Partial analysis" : "Analysis complete" : "A clear view of the process"}</span>{busy && runId && <button className="research-cancel" onClick={() => void cancel()}>Cancel</button>}</div>
-            <div className={`research-live-intent preview-${intentPreview?.phase || "idle"}`}>
+          <div className="research-workflow research-surface" ref={analysisPanel}><div className="research-surface-heading"><h2><span className="research-live-dot" />{viewingHistory ? "Saved analysis" : "Live research"}</h2><span className="research-workflow-meta">{busy ? viewingHistory ? "Loading saved analysis…" : `${elapsed}s elapsed` : reportDone ? reportPartial ? "Partial analysis" : "Analysis complete" : "A clear view of the process"}</span>{busy && runId && !viewingHistory && <button className="research-cancel" onClick={() => void cancel()}>Cancel</button>}</div>
+            {!viewingHistory && <div className={`research-live-intent preview-${intentPreview?.phase || "idle"}`}>
               <div className="research-preview-heading"><h3><span className="research-live-dot" />Live intent <span>· provisional</span></h3><span className="research-agent-tag">{previewSubmitted ? "TURN SUBMITTED" : intentPreview?.phase === "pending" ? "UPDATING" : intentPreview?.phase === "ready" ? "LIVE PREVIEW" : intentPreview?.phase === "error" ? "UNAVAILABLE" : "AWAITING SPEECH"}</span></div>
               <p>{previewSubmitted ? "Research turn submitted. The final Jev decision appears below." : intentPreview?.phase === "pending" ? "Jev is evaluating what you’re saying. Keep speaking naturally." : intentPreview?.phase === "error" ? intentPreview.message || "Live intent preview is unavailable. Your completed question can still start research." : intentPreview?.phase === "ready" ? "Jev’s current assessment, based on the words received so far." : "Speak to see Jev identify your request before analysis begins."}</p>
               {intentPreview?.answers && intentPreview.phase !== "error" && <div className="research-preview-values">
@@ -440,7 +456,7 @@ export default function ResearchWorkspace() {
               </div>}
               {intentPreview?.transcript && <blockquote>“{intentPreview.transcript}”</blockquote>}
               {intentPreview?.answers && intentPreview.phase !== "error" && <small className="research-preview-note">{previewSubmitted ? "Preview from the completed turn; final routing appears below." : intentPreview.phase === "pending" ? "Showing the last received preview while Jev updates this turn." : "Provisional routing only. The full turn determines the final analysis."}</small>}
-            </div>
+            </div>}
             {runQuestion && <p className="research-current-question">{runQuestion}</p>}
             <div className="research-stage-label" role="status">{busy && <span className="research-small-spinner" />}<span>{workLabel}</span></div>
             <div className={`research-routing ${routing ? "has-decision" : ""}`}><div className="research-routing-icon">j<span>·</span></div><div className="research-routing-copy"><div><h3>Jev orchestrator</h3><span className="research-agent-tag">{routing ? "ROUTED" : busy && stage === "routing" ? "CLASSIFYING" : "READY"}</span></div><p>{routing ? `${intent.charAt(0).toUpperCase() + intent.slice(1)} · ${String(routing.profile || "Evidence + critical analysis").replace(/_/g, " ")}` : busy ? "Understanding the request and selecting the right analysis." : "Understands your request and selects the analysis profile."}</p>{routing && <div className="research-routing-values">{typeof intentAnswer?.confidence === "number" && <span>{Math.round(intentAnswer.confidence * 100)}% intent confidence</span>}{typeof codeAnswer?.noul === "number" && <span>Code relevance {codeAnswer.noul.toFixed(2)}</span>}</div>}</div></div>

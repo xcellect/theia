@@ -191,6 +191,81 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "move between papers"):
             self.store.save_job("session-a", second["paperId"], {"jobId": "job-1", "state": "running"})
 
+    def test_history_pages_preserve_every_turn_report_and_message(self):
+        for index in range(45):
+            self.complete(f"run-{index:02}", text=f"# Report {index}\n\nFull cited answer.")
+        pages, before = [], None
+        while True:
+            page = self.store.session("session-a", before=before, limit=20, create=False)
+            self.assertEqual(page["totalRuns"], 45)
+            self.assertEqual(len(page["messages"]), len(page["runs"]) * 2)
+            self.assertTrue(all(run["done"] and run["markdown"].startswith("# Report") for run in page["runs"]))
+            pages[0:0] = page["runs"]
+            if not page["hasMore"]:
+                self.assertIsNone(page["nextBefore"])
+                break
+            before = page["nextBefore"]
+        self.assertEqual([run["runId"] for run in pages], [f"run-{index:02}" for index in range(45)])
+        with self.assertRaisesRegex(ValueError, "cursor"):
+            self.store.session("session-a", before="missing-run", limit=20)
+
+    def test_old_completed_snapshot_retains_partial_event_status_after_reload(self):
+        run = self.begin()
+        self.store.save_run(dict(run, markdown="# Uncertain report"), [
+            {"seq": 1, "type": "report.completed", "payload": {"partial": True}},
+            {"seq": 2, "type": "run.completed", "payload": {"status": "completed", "partial": True}},
+        ])
+        self.assertNotIn("partial", self.store.get_run("run-1"))
+        self.restart()
+        restored = self.store.session("session-a", limit=20)["runs"][0]
+        self.assertEqual(restored["status"], "completed")
+        self.assertTrue(restored["partial"])
+        self.assertEqual(restored["markdown"], "# Uncertain report")
+
+    def test_delete_removes_all_session_records_files_and_keeps_other_workspace(self):
+        paper = self.store.save_paper("session-a", SOURCE)
+        self.complete(source=paper["source"])
+        self.store.save_paper_answer("session-a", paper["paperId"], "run-1", "Saved findings")
+        self.store.save_job("session-a", paper["paperId"], {"jobId": "job-1", "state": "blocked_compute"})
+        self.complete("other-run", "other-session", text="Keep this report")
+        outside = Path(self.tmp.name) / "outside.txt"
+        outside.write_text("Do not delete")
+        (self.root / "sessions/session-a/external.txt").symlink_to(outside)
+        self.assertTrue(self.store.delete_session("session-a"))
+        self.assertFalse((self.root / "sessions/session-a").exists())
+        self.assertEqual(outside.read_text(), "Do not delete")
+        for table in ("messages", "papers", "paper_answers", "jobs", "runs"):
+            self.assertEqual(self.store.db.execute(f"SELECT COUNT(*) FROM {table} WHERE session_id=?", ("session-a",)).fetchone()[0], 0)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE run_id='run-1'").fetchone()[0], 0)
+        self.assertEqual(self.store.get_run("other-run")["markdown"], "Keep this report")
+        self.assertFalse(self.store.delete_session("session-a"))
+        self.assertEqual(self.store.session("session-a", create=False)["runs"], [])
+        self.assertNotIn("session-a", [session["sessionId"] for session in self.store.sessions()])
+        self.restart()
+        self.assertIsNone(self.store.get_run("run-1"))
+        self.assertEqual(self.store.get_run("other-run")["markdown"], "Keep this report")
+
+    def test_delete_rejects_active_work_and_invalid_or_symlink_session_paths(self):
+        self.begin()
+        with self.assertRaisesRegex(RuntimeError, "running"):
+            self.store.delete_session("session-a")
+        self.complete()
+        paper = self.store.save_paper("session-a", SOURCE)
+        self.store.save_job("session-a", paper["paperId"], {"jobId": "job-1", "state": "cloning"})
+        with self.assertRaisesRegex(RuntimeError, "jobs"):
+            self.store.delete_session("session-a")
+        for bad in ("../session-a", "", "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.delete_session(bad)
+        self.store.save_job("session-a", paper["paperId"], {"jobId": "job-1", "state": "completed"})
+        directory = self.root / "sessions/session-a"
+        relocated = self.root / "relocated"
+        directory.rename(relocated)
+        directory.symlink_to(relocated, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            self.store.delete_session("session-a")
+        self.assertTrue((relocated / "runs/run-1/report.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ class SessionResearchMixin:
         return {"runId": run.id, "sessionId": run.session_id, "question": run.question,
                 "sourceIds": run.source_ids, "sources": run.sources, "paperIds": run.paper_ids,
                 "markdown": run.markdown, "status": status, "done": run.done, "cancelled": run.cancelled,
+                "partial": bool(terminal and terminal["payload"].get("partial")),
                 "searchEnabled": run.search_enabled, "paper2agentEnabled": run.paper2agent_enabled,
                 "events": list(run.events)}
 
@@ -90,19 +91,64 @@ class SessionResearchMixin:
         self.runs[run.id] = run
         return run
 
-    def public_session(self, session_id):
-        data = self.workspace.session(session_id)
+    async def delete_session(self, session_id):
+        from research import ResearchError
+        async with self.lock:
+            # A connected voice agent can submit a new turn at any time. Keep its
+            # workspace intact until the user ends that connection.
+            if self.voice and (self.voice_context or {}).get("sessionId") == session_id:
+                raise ResearchError("End this conversation's voice connection before deleting it.", code="SESSION_BUSY", status=409)
+            owned = [run for run in self.runs.values() if run.session_id == session_id]
+            if any(not run.done or (run.task and not run.task.done()) or
+                   any(not task.done() for task in self._children.get(run.id, [])) for run in owned):
+                raise ResearchError("Wait for this conversation's research to finish before deleting it.", code="SESSION_BUSY", status=409)
+            cleanup_error = None
+            try:
+                removed = self.workspace.delete_session(session_id)
+            except RuntimeError as error:
+                raise ResearchError("Wait for this conversation's jobs to finish before deleting it.", code="SESSION_BUSY", status=409) from error
+            except OSError as error:
+                if self.workspace.session_exists(session_id):
+                    raise
+                # Filesystem cleanup can fail after the database transaction.
+                # Deleted content must still be evicted from replay/source caches.
+                removed, cleanup_error = True, error
+            if not removed:
+                raise ResearchError("This conversation is no longer available.", code="SESSION_NOT_FOUND", status=404)
+            for run in owned:
+                run.persist = None
+                handle = self._persist_handles.pop(run.id, None)
+                if handle:
+                    handle.cancel()
+                self._children.pop(run.id, None)
+                self.runs.pop(run.id, None)
+            removed_ids = {run.id for run in owned}
+            self.requests = {key: value for key, value in self.requests.items() if value not in removed_ids}
+            self.request_fingerprints = {key: value for key, value in self.request_fingerprints.items() if key in self.requests}
+            if self.active_id in removed_ids:
+                self.active_id = None
+            if self.latest_id in removed_ids:
+                self.latest_id = next(reversed(self.runs), None)
+            if (self.voice_context or {}).get("sessionId") == session_id:
+                self.voice_context = None
+            if cleanup_error:
+                raise cleanup_error
+            return {"sessionId": session_id, "status": "deleted"}
+
+    def public_session(self, session_id, before=None):
+        data = self.workspace.session(session_id, before=before, limit=20, create=False)
         # Files/absolute paths remain on the server; the UI needs identity and job outcomes.
         papers = []
         for paper in data["papers"]:
             source = paper.get("source", {})
             papers.append({key: paper.get(key, source.get(key)) for key in
                 ("paperId", "sourceId", "title", "url", "coverage", "status", "version", "jobs", "reports")})
-        runs = [{key: run.get(key) for key in ("runId", "question", "status", "createdAt", "updatedAt")}
+        runs = [{key: run.get(key) for key in ("runId", "question", "status", "createdAt", "updatedAt", "done", "markdown", "partial")}
                 for run in data["runs"]]
         return {"sessionId": session_id, "papers": papers, "runs": runs,
-                "messages": [{key: m.get(key) for key in ("messageId", "role", "content", "runId")} for m in data["messages"][-20:]],
-                "summary": data.get("summary", "")}
+                "messages": [{key: m.get(key) for key in ("messageId", "role", "content", "runId", "status", "createdAt")} for m in data["messages"]],
+                "summary": data.get("summary", ""), "totalRuns": data["totalRuns"],
+                "hasMore": data["hasMore"], "nextBefore": data["nextBefore"]}
 
     def _question_context(self, run):
         """Prior questions guide follow-ups; prior generated claims never enter readers."""

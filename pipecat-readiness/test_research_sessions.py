@@ -90,6 +90,84 @@ class PaperSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(run.events)[-1]["type"], "run.completed", list(run.events)[-1])
         return run
 
+    async def test_session_api_returns_reports_deletes_workspace_and_expires_replays(self):
+        run = await self.start()
+        app = FastAPI()
+        register_research_routes(app, self.runner)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            data = (await client.get("/research/sessions/session-one")).json()
+            self.assertEqual(data["runs"][0]["markdown"], run.markdown)
+            self.assertTrue(data["runs"][0]["done"])
+            self.assertEqual(data["messages"][0]["content"], run.question)
+            self.assertEqual(data["messages"][1]["content"], run.markdown)
+            self.assertIn("createdAt", data["messages"][1])
+            self.assertFalse(data["hasMore"])
+            self.assertEqual((await client.get("/research/sessions/session-one?before=unknown")).status_code, 400)
+            response = await client.delete("/research/sessions/session-one")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), {"sessionId": "session-one", "status": "deleted"})
+            self.assertEqual((await client.get(f"/research/runs/{run.id}/events")).status_code, 404)
+            self.assertEqual((await client.get(f"/research/runs/{run.id}/sources/{next(iter(run.sources))}")).status_code, 404)
+            self.assertEqual((await client.delete("/research/sessions/session-one")).status_code, 404)
+            self.assertEqual((await client.delete("/research/sessions/invalid%20id")).status_code, 400)
+            self.assertEqual((await client.get("/research/sessions/session-one")).json()["runs"], [])
+            self.assertEqual((await client.get("/research/sessions")).json()["sessions"], [])
+        self.assertNotIn(run.id, self.runner.runs)
+        self.assertNotIn("first", self.runner.requests)
+        self.assertNotIn("first", self.runner.request_fingerprints)
+        self.assertIsNone(self.runner.latest_id)
+        self.assertIsNone(self.runner.get_run(run.id))
+        self.assertFalse((self.root / "sessions/session-one").exists())
+
+    async def test_delete_rejects_active_research_and_bound_voice_without_losing_history(self):
+        entered = asyncio.Event()
+        async def waiting_route(run):
+            entered.set()
+            await asyncio.Event().wait()
+        self.runner._routing = waiting_route
+        run = await self.runner.start({"clientRequestId": "active", "sessionId": "session-one",
+            "sourceIds": [], "question": "Explain the paper", "paper2agentEnabled": True})
+        await asyncio.wait_for(entered.wait(), 2)
+        with self.assertRaises(ResearchError) as raised:
+            await self.runner.delete_session("session-one")
+        self.assertEqual(raised.exception.status, 409)
+        self.assertIsNotNone(self.runner.workspace.get_run(run.id))
+        await self.runner.cancel(run.id)
+        self.runner.voice = object()
+        self.runner.voice_context = {"sessionId": "session-one"}
+        with self.assertRaises(ResearchError) as raised:
+            await self.runner.delete_session("session-one")
+        self.assertEqual(raised.exception.code, "SESSION_BUSY")
+        self.runner.voice = None
+        await self.runner.delete_session("session-one")
+        self.assertIsNone(self.runner.voice_context)
+
+    async def test_cleanup_error_is_sanitized_and_deleted_reports_leave_memory_cache(self):
+        run = await self.start()
+        app = FastAPI()
+        register_research_routes(app, self.runner)
+        with patch("research_workspace.shutil.rmtree", side_effect=OSError("/private/secret-file")):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.delete("/research/sessions/session-one")
+                self.assertEqual(response.status_code, 500)
+                self.assertNotIn("/private", response.text)
+                self.assertEqual((await client.get(f"/research/runs/{run.id}/events")).status_code, 404)
+        self.assertNotIn(run.id, self.runner.runs)
+        self.assertFalse(self.runner.workspace.session_exists("session-one"))
+
+    async def test_public_session_pages_more_than_twenty_messages_without_losing_turns(self):
+        for index in range(25):
+            run = self.runner.workspace.begin_run(f"page-{index:02}", "paged", f"Question {index}", f"request-{index}", "fixture")
+            self.runner.workspace.save_run(dict(run, done=True, status="completed", markdown=f"# Answer {index}"))
+        latest = self.runner.public_session("paged")
+        self.assertEqual(len(latest["runs"]), 20)
+        self.assertEqual(len(latest["messages"]), 40)
+        self.assertTrue(latest["hasMore"])
+        earlier = self.runner.public_session("paged", before=latest["nextBefore"])
+        self.assertEqual(len(earlier["runs"]), 5)
+        self.assertFalse(earlier["hasMore"])
+        self.assertEqual([run["runId"] for run in earlier["runs"] + latest["runs"]], [f"page-{index:02}" for index in range(25)])
+
     async def test_two_paper_run_streams_and_persists_balanced_evidence_and_citations(self):
         run = await self.start()
         self.assertEqual(len(run.sources), 2)
