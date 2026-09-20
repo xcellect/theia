@@ -1596,7 +1596,7 @@
 .conversation-problem { padding:12px 20px; color:#e6b388; font-size:12px; }
 .conversation-load { justify-self:center; }
 .research-workflow { scroll-margin-top:20px; }
-.research-paper-selection { margin:12px 18px; padding:12px 14px; border:1px solid #38334b; border-radius:8px; background:#211c2d; overflow-wrap:anywhere; }
+.research-paper-selection { margin:12px 20px; padding:12px 14px; border:1px solid #38334b; border-radius:8px; background:#211c2d; overflow-wrap:anywhere; }
 .research-paper-selection h3 { display:flex; flex-wrap:wrap; justify-content:space-between; gap:7px; color:#d6caef; font-size:12px; }
 .research-paper-selection h3 span { color:#a798bb; font-size:10px; font-weight:400; }
 .research-paper-selection p { color:#b4aac3; font-size:11px; line-height:1.7; margin-top:6px; }
@@ -1987,10 +1987,10 @@
 .research-paper-preparation p.research-paper-preparation-title { color:#ece6f9; font-size:12px; }
 .research-paper-preparation > small { display:block; margin-top:8px; color:#928ca5; font-size:10px; line-height:1.6; }
 .research-paper-preparation.preparation-failed,.research-paper-preparation.preparation-stopped { border-color:#494138; background:#211e1b; }
-.research-current-question { padding:14px 0 0; color:#eef0f7; font-size:14px; overflow-wrap:anywhere; }
+.research-current-question { padding:14px 20px 0; color:#eef0f7; font-size:14px; overflow-wrap:anywhere; }
 
 .research-search-results {
-  margin:17px 0 0;
+  margin:17px 20px 0;
   padding:14px;
   border:1px solid #2c3345;
   border-radius:10px;
@@ -2013,6 +2013,8 @@
 .research-search-status.status-extracted { color:#a4d3b9; }
 .research-search-status.status-unavailable { color:#dfba92; }
 .research-search-note { font-size:10px; line-height:1.6; color:#818ea8; padding-top:9px; }
+.research-workflow > .research-search-note { padding-inline:20px; overflow-wrap:anywhere; }
+.research-workflow > .research-search-note:last-of-type { padding-bottom:14px; }
 
 @media(max-width:600px) {
   .research-new { font-size:10px !important; padding:7px 9px; }
