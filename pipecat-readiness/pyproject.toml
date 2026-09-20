@@ -8,6 +8,10 @@ dependencies = [
   "fastapi>=0.115.6,<1",
   "uvicorn>=0.32.0,<1",
   "python-dotenv>=1,<2",
+  "pymupdf==1.28.2",
+  "pymupdf4llm==1.28.2",
+  "pypdf==6.18.1",
+  "pillow==12.2.0",
 ]
 
 [tool.uv]

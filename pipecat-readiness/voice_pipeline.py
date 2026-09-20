@@ -227,7 +227,7 @@ class BoundedGradiumTTSService(GradiumTTSService):
 class VoiceSession:
     """Own one worker, its clients, and the lifetime of the peer connection."""
 
-    def __init__(self, connection, config: VoiceConfig | GradiumVoiceConfig):
+    def __init__(self, connection, config: VoiceConfig | GradiumVoiceConfig, *, research=None):
         self.connection = connection
         self._closed = False
         self.transport = SmallWebRTCTransport(
@@ -239,11 +239,15 @@ class VoiceSession:
                 api_key=config.gradium_key, api_endpoint_base_url=config.stt_url,
                 enable_turn_detection=True, request_timeout=config.timeout_seconds,
             )
-            self.llm = BoundedGeneralComputeLLMService(
-                api_key=config.generalcompute_key, base_url=config.base_url,
-                settings=OpenAILLMService.Settings(model=config.model, max_tokens=GC_MAX_TOKENS, system_instruction=SYSTEM_INSTRUCTION),
-                request_timeout=config.timeout_seconds,
-            )
+            if research is not None:
+                from research_bridge import ResearchTurnProcessor
+                self.llm = ResearchTurnProcessor(research)
+            else:
+                self.llm = BoundedGeneralComputeLLMService(
+                    api_key=config.generalcompute_key, base_url=config.base_url,
+                    settings=OpenAILLMService.Settings(model=config.model, max_tokens=GC_MAX_TOKENS, system_instruction=SYSTEM_INSTRUCTION),
+                    request_timeout=config.timeout_seconds,
+                )
             self.tts = BoundedGradiumTTSService(
                 api_key=config.gradium_key, url=config.tts_url,
                 settings=GradiumTTSService.Settings(voice=config.voice_id),
@@ -284,15 +288,21 @@ class VoiceSession:
             self.context,
             user_params=user_params,
         )
+        research_processors = []
+        if research is not None:
+            from research_bridge import ResearchTranscriptObserver
+            research_processors.append(ResearchTranscriptObserver(self.llm))
         self.pipeline = Pipeline([
             self.transport.input(),
             self.stt,
+            *research_processors,
             self.aggregators.user(),
             self.llm,
             self.tts,
             self.transport.output(),
             self.aggregators.assistant(),
         ])
+        self.rtvi = SafeRTVIProcessor(reporter=self.reporter)
         self.worker = PipelineWorker(
             self.pipeline,
             params=PipelineParams(
@@ -301,7 +311,7 @@ class VoiceSession:
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
-            rtvi_processor=SafeRTVIProcessor(reporter=self.reporter),
+            rtvi_processor=self.rtvi,
             rtvi_observer_params=RTVIObserverParams(system_logs_enabled=False),
             idle_timeout_secs=IDLE_TIMEOUT_SECONDS,
             cancel_timeout_secs=5,
@@ -309,6 +319,18 @@ class VoiceSession:
             start_timeout_secs=30,
         )
         self.runner = WorkerRunner(handle_sigint=False, handle_sigterm=False)
+        self.research_bridge = self.llm if research is not None else None
+        if self.research_bridge is not None:
+            self.research_bridge.worker = self.worker
+            self.research_bridge.rtvi = self.rtvi
+
+            @self.rtvi.event_handler("on_client_ready")
+            async def on_research_ready(processor):
+                await self.research_bridge.ready()
+
+            @self.aggregators.user().event_handler("on_user_turn_stopped")
+            async def on_research_turn(aggregator, strategy, message):
+                self.research_bridge.submit(message.content, message.timestamp)
 
         @self.transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
@@ -338,13 +360,16 @@ class VoiceSession:
         if self._closed:
             return
         self._closed = True
+        if self.research_bridge is not None:
+            await self.research_bridge.close()
         await self.runner.cancel("Session ended")
         # Disconnect even if setup never reached the input/output processors.
         with suppress(Exception):
             await self.connection.disconnect()
         # Both are idempotent and cover failures before worker setup completed.
-        with suppress(Exception):
-            await self.llm._client.close()
+        if self.research_bridge is None:
+            with suppress(Exception):
+                await self.llm._client.close()
         with suppress(Exception):
             await self.tts._http_client.aclose()
         if isinstance(self.stt, GradiumSTTService):

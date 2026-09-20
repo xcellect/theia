@@ -2,11 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Voice AI · Practice",
-  description: "A local practice space for Hume EVI voice conversations. Live audio requires your configured Hume account.",
+  title: "Research Orb · Think out loud",
+  description: "Follow Jev routing, Paper2Agent source analysis, and cited research reports as they happen.",
   robots: { index: false, follow: false },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+  // Browser scripts can add root attributes (for example, class="hydrated") before React starts.
+  return <html lang="en" suppressHydrationWarning><body>{children}</body></html>;
 }

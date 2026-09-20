@@ -25,10 +25,15 @@ try {
   const page = await fetch(origin, { signal: AbortSignal.timeout(5000) });
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.match(html, /Voice AI/);
-  assert.match(html, /Hume EVI/);
-  assert.match(html, /Modular Pipecat/);
-  assert.match(html, /Gradium \+ General Compute/);
+  assert.match(html, /Research Orb/);
+  assert.match(html, /Follow the evidence/);
+  assert.match(html, /Jev orchestrator/);
+  const practice = await fetch(`${origin}/practice`, { signal: AbortSignal.timeout(5000) });
+  assert.equal(practice.status, 200);
+  const practiceHtml = await practice.text();
+  assert.match(practiceHtml, /Hume EVI/);
+  assert.match(practiceHtml, /Modular Pipecat/);
+  assert.match(practiceHtml, /Gradium \+ General Compute/);
   assert.equal(page.headers.get('permissions-policy'), 'microphone=(self), camera=()');
   const token = await fetch(`${origin}/api/hume/token`, { method: 'POST', headers: { Origin: origin }, signal: AbortSignal.timeout(5000) });
   assert.equal(token.status, 503);
@@ -38,6 +43,8 @@ try {
   assert.equal(cross.status, 403);
   const get = await fetch(`${origin}/api/hume/token`, { signal: AbortSignal.timeout(5000) });
   assert.equal(get.status, 405);
+  const researchCross = await fetch(`${origin}/api/research/runs`, { method: 'POST', headers: { Origin: 'https://untrusted.example', 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) });
+  assert.equal(researchCross.status, 403);
   for (const stack of ['pipecat', 'gradium']) {
     for (const method of ['POST', 'PATCH']) {
       const rejected = await fetch(`${origin}/api/${stack}/offer`, { method, headers: { Origin: 'https://untrusted.example', 'Content-Type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(5000) });
@@ -49,7 +56,7 @@ try {
     const offerGet = await fetch(`${origin}/api/${stack}/offer`, { signal: AbortSignal.timeout(5000) });
     assert.equal(offerGet.status, 405);
   }
-  console.log('PASS production HTTP: all three route choices rendered; health 200/no-store; missing EVI config 503; cross-origin token and both modular signaling routes 403; invalid signaling 400; GET token/offer 405; private no-store responses; microphone policy.');
+  console.log('PASS production HTTP: research home and three practice routes rendered; health 200/no-store; missing EVI config 503; cross-origin research/token/signaling 403; invalid signaling 400; GET token/offer 405; microphone policy.');
   console.log('No provider requests. This is HTTP verification, not browser rendering or microphone/audio validation.');
 } catch (error) {
   console.error(error instanceof assert.AssertionError ? error.message : 'HTTP verification failed: local connection or startup unavailable.');

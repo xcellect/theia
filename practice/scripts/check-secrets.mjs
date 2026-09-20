@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadPracticeEnv } from '../lib/env.mjs';
 loadPracticeEnv();
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const keys = ['HUME_API_KEY', 'HUME_SECRET_KEY', 'SAMBANOVA_API_KEY', 'DEEPGRAM_API_KEY', 'GENERALCOMPUTE_API_KEY', 'GRADIUM_API_KEY', 'CLM_AUTH_SECRET'];
+const keys = ['HUME_API_KEY', 'HUME_SECRET_KEY', 'SAMBANOVA_API_KEY', 'DEEPGRAM_API_KEY', 'GENERALCOMPUTE_API_KEY', 'GRADIUM_API_KEY', 'TYPESAFE_API_KEY', 'EXA_API_KEY', 'CLM_AUTH_SECRET'];
 const secrets = keys.map(name => process.env[name]).filter(value => value && value.length >= 8);
 const skip = new Set(['node_modules', '.venv', '.cache', '.git', 'local', '.next']);
 let files = 0;
@@ -24,7 +24,7 @@ async function scan(dir, bundle = false) {
     if (secrets.some(secret => content.includes(secret))) {
       console.error(`FAIL: configured credential value found in ${path.relative(root, filename)}`); failed = true;
     }
-    if (/NEXT_PUBLIC_(?:HUME|SAMBANOVA|DEEPGRAM|GENERALCOMPUTE|GRADIUM|CLM)_[A-Z_]*(?:KEY|SECRET)/.test(content)) {
+    if (/NEXT_PUBLIC_(?:HUME|SAMBANOVA|DEEPGRAM|GENERALCOMPUTE|GRADIUM|TYPESAFE|EXA|CLM)_[A-Z_]*(?:KEY|SECRET)/.test(content)) {
       console.error(`FAIL: public provider-secret variable in ${path.relative(root, filename)}`); failed = true;
     }
   }
